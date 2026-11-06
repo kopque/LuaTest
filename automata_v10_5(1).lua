@@ -1,5 +1,5 @@
 -- =========================================================================
---   AUTOMATA HUB v13.0 - BLOX FRUITS
+--   AUTOMATA HUB v13.1 - BLOX FRUITS
 -- =========================================================================
 -- AVISO: as partes específicas do jogo (remotes, nomes de pastas, bosses,
 -- ID da lua, nomes das ilhas de evento) vêm de scripts da comunidade e NÃO
@@ -18,7 +18,7 @@
 --    resultado do Fruit Sniper + botão de teste do Webhook
 --  * Loja (estilos de luta, haki), jogador (speed, pulo infinito...), etc.
 
-local VERSAO = "13.0"
+local VERSAO = "13.1"
 
 -- =========================================================================
 -- LOG / SERVIÇOS
@@ -1015,11 +1015,58 @@ function F.raridade(nome)
     return nil
 end
 
-loopToggle("AutoRandomFruit", "Fruta", function()
-    local r = obterCommF():InvokeServer("Cousin", "Buy")
-    registrarLog("Fruta", "Resposta do jogo: " .. tostring(r))
-    return tonumber(Cfg:Get("IntervaloFruta")) or 7200
-end)
+-- Auto Random Fruit: espera "interrompível" (o toggle responde na hora) e
+-- tentativa nova em 5 min se a compra não for confirmada.
+do
+    local function esperarAtivo(chave, segundos)
+        local t0 = os.clock()
+        while Estado.rodando and Cfg:Get(chave) and os.clock() - t0 < segundos do
+            task.wait(1)
+        end
+    end
+
+    local function contarFrutas()
+        local inv = nil
+        local ok, r = pcall(function() return obterCommF():InvokeServer("getInventoryFruits") end)
+        if ok and type(r) == "table" then
+            inv = 0
+            for _ in pairs(r) do inv = inv + 1 end
+        end
+        local mochila = 0
+        for _, pasta in ipairs({ LocalPlayer:FindFirstChildOfClass("Backpack"), LocalPlayer.Character }) do
+            if pasta then
+                for _, t in ipairs(pasta:GetChildren()) do
+                    if t:IsA("Tool") and t.ToolTip == "Blox Fruit" then mochila = mochila + 1 end
+                end
+            end
+        end
+        return inv, mochila
+    end
+
+    task.spawn(function()
+        while Estado.rodando do
+            if Cfg:Get("AutoRandomFruit") then
+                local ok, err = pcall(function()
+                    local invAntes, mochAntes = contarFrutas()
+                    local r = obterCommF():InvokeServer("Cousin", "Buy")
+                    task.wait(2)
+                    local invDepois, mochDepois = contarFrutas()
+                    local ganhou = (invAntes and invDepois and invDepois > invAntes) or mochDepois > mochAntes
+                    registrarLog("Fruta", "Resposta do jogo: " .. tostring(r))
+                    if ganhou then
+                        notificar("Random Fruit", "Fruta comprada! Próxima tentativa conforme o intervalo.")
+                        esperarAtivo("AutoRandomFruit", tonumber(Cfg:Get("IntervaloFruta")) or 7200)
+                    else
+                        notificar("Random Fruit", "Não comprou (resposta: " .. tostring(r) .. "). Nova tentativa em 5 min.")
+                        esperarAtivo("AutoRandomFruit", 300)
+                    end
+                end)
+                if not ok then registrarErro("Fruta", err) esperarAtivo("AutoRandomFruit", 30) end
+            end
+            task.wait(1)
+        end
+    end)
+end
 
 loopToggle("AutoRandomBone", "Bones", function()
     local r = obterCommF():InvokeServer("Bones", "Buy", 1, 1)
@@ -1090,8 +1137,11 @@ loopToggle("AutoTweenFruit", "TweenFruta", function()
         end
     end
     if melhor then
-        MovementService:Interpola(melhorParte.CFrame + Vector3.new(0, 3, 0), 150, function() return Cfg:Get("AutoTweenFruit") and melhor.Parent ~= nil end)
-        if Cfg:Get("AutoTweenFruit") and melhor.Parent then
+        -- a Tool pode só mudar de pai ao ser coletada: "no mapa" = filha do Workspace
+        local ativo = function() return Cfg:Get("AutoTweenFruit") and melhor.Parent == Workspace end
+        local chegou = MovementService:Interpola(melhorParte.CFrame + Vector3.new(0, 3, 0), 150, ativo)
+        -- só encosta se o tween realmente chegou (evita teleporte direto de longe)
+        if chegou and ativo() then
             local pegou = F.pegarFruta(melhor, melhorParte)
             registrarLog("TweenFruta", (pegou and "Coletou: " or "Não conseguiu coletar: ") .. tostring(melhor.Name))
         end
@@ -1099,16 +1149,16 @@ loopToggle("AutoTweenFruit", "TweenFruta", function()
     return 0.5
 end)
 
--- O Interpola para a ~8 studs do alvo e cancela o tween, então o personagem
--- nunca encostava na fruta (o pickup do jogo é por toque no Handle).
--- Aqui encostamos de fato: posiciona em cima do Handle e dispara o toque.
+-- O Interpola para a ~1.5 studs do alvo e cancela o tween; o pickup do jogo
+-- é por toque no Handle, então aqui encostamos de fato: posiciona em cima do
+-- Handle e dispara o toque.
 function F.pegarFruta(fruta, parte)
     local root = meuRoot()
     if not root or not fruta or not parte then return false end
     local antes = Cfg:Get("EmMovimento")
     Cfg:Set("EmMovimento", true) -- mantém o noclip enquanto encosta
     for _ = 1, 8 do
-        if not fruta.Parent or not parte.Parent then break end
+        if fruta.Parent ~= Workspace or not parte.Parent then break end
         -- +3 studs: os pés ficam na altura do Handle, sem enterrar o corpo no chão
         pcall(function() root.CFrame = parte.CFrame + Vector3.new(0, 3, 0) end)
         if firetouchinterest then
@@ -1120,7 +1170,7 @@ function F.pegarFruta(fruta, parte)
         task.wait(0.15)
     end
     Cfg:Set("EmMovimento", antes)
-    return not fruta.Parent
+    return fruta.Parent ~= Workspace
 end
 
 function F.trazerTodasFrutas()
@@ -1522,8 +1572,9 @@ function F.irParaFrutaMaisProxima()
     if melhor then
         task.spawn(function()
             local ok, err = pcall(function()
-                MovementService:Interpola(melhor.CFrame + Vector3.new(0, 3, 0), 250)
-                F.pegarFruta(melhorFruta, melhor)
+                -- só encosta se o tween chegou (evita teleporte direto de longe)
+                local chegou = MovementService:Interpola(melhor.CFrame + Vector3.new(0, 3, 0), 250)
+                if chegou then F.pegarFruta(melhorFruta, melhor) end
             end)
             if not ok then registrarErro("Teleport", err) end
         end)
@@ -2539,8 +2590,11 @@ local function tornarArrastavel(frame, alca)
             local d = input.Position - dragStart
             local pai = frame.Parent
             local tela = pai and pai.AbsoluteSize or Vector2.new(1280, 720)
-            local nx = math.clamp(startPos.X.Offset + d.X, 0, math.max(0, tela.X - 80))
-            local ny = math.clamp(startPos.Y.Offset + d.Y, 0, math.max(0, tela.Y - 40))
+            -- o UIScale também multiplica o offset da Position: compensa a escala
+            local esc = frame:FindFirstChildOfClass("UIScale")
+            local s = esc and esc.Scale or 1
+            local nx = math.clamp(startPos.X.Offset + d.X / s, 0, math.max(0, tela.X / s - 80))
+            local ny = math.clamp(startPos.Y.Offset + d.Y / s, 0, math.max(0, tela.Y / s - 40))
             frame.Position = UDim2.fromOffset(nx, ny)
         end
     end))
@@ -2598,10 +2652,11 @@ local function construirUI()
     local escala = Instance.new("UIScale")
     escala.Scale = math.clamp(math.min(vp.X * 0.9 / LARGURA, vp.Y * 0.85 / ALTURA), 0.5, 1)
     escala.Parent = Main
-    -- centraliza UMA vez; o topo fica fixo ao minimizar/abrir
+    -- centraliza UMA vez (compensando a escala); o topo fica fixo ao minimizar/abrir
+    local s0 = escala.Scale
     Main.Position = UDim2.fromOffset(
-        math.max(0, (vp.X - LARGURA * escala.Scale) / 2),
-        math.max(0, (vp.Y - ALTURA * escala.Scale) / 2))
+        math.max(0, (vp.X - LARGURA * s0) / 2) / s0,
+        math.max(0, (vp.Y - ALTURA * s0) / 2) / s0)
 
     -- topo
     local Topo = Instance.new("Frame")
