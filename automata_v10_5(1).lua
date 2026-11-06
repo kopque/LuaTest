@@ -456,24 +456,67 @@ local function escolherFerramenta(char, backpack, tooltip)
     return char:FindFirstChildOfClass("Tool") or backpack:FindFirstChildOfClass("Tool")
 end
 
-function CombatManager:Atacar(char, hum, backpack, tooltip)
+-- Remotes de ataque do jogo (Modules.Net). Blox Fruits NÃO registra dano por
+-- clique virtual: o servidor só aceita RegisterAttack + RegisterHit.
+local AtaqueNet = { atk = nil, hit = nil, ultimo = 0 }
+
+local function obterNetAtaque()
+    if AtaqueNet.atk and AtaqueNet.atk.Parent and AtaqueNet.hit and AtaqueNet.hit.Parent then
+        return AtaqueNet.atk, AtaqueNet.hit
+    end
+    local mods = ReplicatedStorage:FindFirstChild("Modules")
+    local net = mods and mods:FindFirstChild("Net")
+    if not net then return nil end
+    AtaqueNet.atk = net:FindFirstChild("RE/RegisterAttack")
+    AtaqueNet.hit = net:FindFirstChild("RE/RegisterHit")
+    return AtaqueNet.atk, AtaqueNet.hit
+end
+
+function CombatManager:Golpear(alvo)
+    local atk, hit = obterNetAtaque()
+    if not atk or not hit then return false end
+    local root = meuRoot()
+    local pasta = pastaEnemies()
+    if not root or not pasta or not alvo then return false end
+
+    local lista = {}
+    local function adicionar(m)
+        local r = m:FindFirstChild("HumanoidRootPart")
+        local h = m:FindFirstChildOfClass("Humanoid")
+        if r and h and h.Health > 0 then table.insert(lista, { m, r }) end
+    end
+    adicionar(alvo)
+    for _, m in ipairs(pasta:GetChildren()) do
+        if m ~= alvo then
+            local r = m:FindFirstChild("HumanoidRootPart")
+            if r and (r.Position - root.Position).Magnitude <= 60 then adicionar(m) end
+        end
+    end
+    if #lista == 0 then return false end
+
+    local parte = alvo:FindFirstChild("Head") or alvo:FindFirstChild("HumanoidRootPart")
+    pcall(function() atk:FireServer(0) end)
+    pcall(function() hit:FireServer(parte, lista) end)
+    return true
+end
+
+function CombatManager:Atacar(char, hum, backpack, tooltip, alvo)
     local ferramenta = escolherFerramenta(char, backpack, tooltip)
     if ferramenta and ferramenta.Parent ~= char then
         hum:EquipTool(ferramenta)
         task.wait(0.05)
     end
-    if ferramenta and ferramenta.Parent == char then
-        if VirtualUser then
-            pcall(function()
-                local cam = Workspace.CurrentCamera
-                local cf = cam and cam.CFrame or CFrame.new()
-                VirtualUser:Button1Down(Vector2.new(0, 0), cf)
-                task.wait(Cfg:Get("FastAttack") and 0.01 or 0.05)
-                VirtualUser:Button1Up(Vector2.new(0, 0), cf)
-            end)
-        end
-        pcall(function() ferramenta:Activate() end)
-    end
+    if not (ferramenta and ferramenta.Parent == char) then return end
+
+    -- limita a frequência (Fast Attack = quase todo frame)
+    local intervalo = Cfg:Get("FastAttack") and 0.03 or 0.12
+    if os.clock() - AtaqueNet.ultimo < intervalo then return end
+    AtaqueNet.ultimo = os.clock()
+
+    CombatManager:Golpear(alvo)
+    -- animação / fallback. NÃO usamos mais VirtualUser:Button1Down(0,0):
+    -- isso clicava no canto superior esquerdo da tela e apertava os botões da UI.
+    pcall(function() ferramenta:Activate() end)
 end
 
 function CombatManager:UsarHabilidades()
@@ -746,7 +789,7 @@ local function combater(modo, alvo, char, myRoot, myHum, backpack)
                 skills = true
             end
         end
-        CombatManager:Atacar(char, myHum, backpack, tooltip)
+        CombatManager:Atacar(char, myHum, backpack, tooltip, alvo)
         if skills then CombatManager:UsarHabilidades() end
         task.wait()
     end
@@ -2293,7 +2336,12 @@ local function tornarArrastavel(frame, alca)
     ScriptJanitor:Adicionar(UserInputService.InputChanged:Connect(function(input)
         if input == dragInput and dragging then
             local d = input.Position - dragStart
-            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+            local pai = frame.Parent
+            local tela = pai and pai.AbsoluteSize or Vector2.new(1280, 720)
+            local tam = frame.AbsoluteSize
+            local nx = math.clamp(startPos.X.Offset + d.X, 0, math.max(0, tela.X - 80))
+            local ny = math.clamp(startPos.Y.Offset + d.Y, 0, math.max(0, tela.Y - 40))
+            frame.Position = UDim2.fromOffset(nx, ny)
         end
     end))
 end
@@ -2328,8 +2376,8 @@ local function construirUI()
     local Main = Instance.new("Frame")
     Main.Name = "Main"
     Main.Size = UDim2.fromOffset(LARGURA, ALTURA)
-    Main.AnchorPoint = Vector2.new(0.5, 0.5)
-    Main.Position = UDim2.new(0.5, 0, 0.5, 0)
+    Main.AnchorPoint = Vector2.new(0, 0)
+    Main.Position = UDim2.fromOffset(40, 40) -- ajustado logo abaixo, depois do UIScale
     Main.BackgroundColor3 = Tema.fundo
     Main.BorderSizePixel = 0
     Main.Active = true
@@ -2350,6 +2398,10 @@ local function construirUI()
     local escala = Instance.new("UIScale")
     escala.Scale = math.clamp(math.min(vp.X * 0.9 / LARGURA, vp.Y * 0.85 / ALTURA), 0.5, 1)
     escala.Parent = Main
+    -- centraliza UMA vez; o topo fica fixo ao minimizar/abrir
+    Main.Position = UDim2.fromOffset(
+        math.max(0, (vp.X - LARGURA * escala.Scale) / 2),
+        math.max(0, (vp.Y - ALTURA * escala.Scale) / 2))
 
     -- topo
     local Topo = Instance.new("Frame")
