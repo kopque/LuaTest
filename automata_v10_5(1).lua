@@ -555,6 +555,31 @@ end
 -- =========================================================================
 -- MOVIMENTAÇÃO (um tween por vez)
 -- =========================================================================
+-- Detecta se o HumanoidRootPart está enfiado em chão/parede (só peças que
+-- colidem; ignora mobs e outros jogadores). A caixa é um pouco menor que o
+-- corpo para que ficar em pé no chão NÃO conte como "preso".
+local ParamsColisao = OverlapParams.new()
+ParamsColisao.FilterType = Enum.RaycastFilterType.Exclude
+pcall(function() ParamsColisao.RespectCanCollide = true end)
+
+local function personagemPreso(char)
+    local ok, res = pcall(function()
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if not root then return false end
+        -- sentado (barco, assento): o corpo fica dentro do assento de propósito
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum and hum.SeatPart then return false end
+        local excluir = { char }
+        local e = Workspace:FindFirstChild("Enemies")
+        if e then table.insert(excluir, e) end
+        local c = Workspace:FindFirstChild("Characters")
+        if c then table.insert(excluir, c) end
+        ParamsColisao.FilterDescendantsInstances = excluir
+        return #Workspace:GetPartBoundsInBox(root.CFrame, Vector3.new(2.2, 5, 1.4), ParamsColisao) > 0
+    end)
+    return ok and res == true
+end
+
 local MovementService = { _ocupado = false }
 
 function MovementService:Interpola(destino, velocidade, aindaAtivo)
@@ -578,7 +603,7 @@ function MovementService:Interpola(destino, velocidade, aindaAtivo)
             and (aindaAtivo == nil or aindaAtivo())
             and hum.Health > 0
             and root.Parent
-            and (root.Position - destino.Position).Magnitude > 8 do
+            and (root.Position - destino.Position).Magnitude > 1.5 do
             task.wait(0.1)
             gasto = gasto + 0.1
             if gasto > tempo + 3 then break end
@@ -586,6 +611,7 @@ function MovementService:Interpola(destino, velocidade, aindaAtivo)
     end)
 
     if tween then pcall(function() tween:Cancel() tween:Destroy() end) end
+    pcall(function() root.AssemblyLinearVelocity = Vector3.zero end)
     self._ocupado = false
     Cfg:Set("EmMovimento", false)
 
@@ -1007,22 +1033,50 @@ loopToggle("AutoElite", "Elite", function()
     return 30
 end)
 
-loopToggle("AutoStoreFruit", "Guardar", function()
-    -- não guarda a fruta se você a usa para farmar
-    if Cfg:Get("AutoMasteryFruit") or Cfg:Get("Weapon") == "Blox Fruit" then return 3 end
-    local char, backpack = LocalPlayer.Character, LocalPlayer:FindFirstChildOfClass("Backpack")
-    for _, container in ipairs({ backpack, char }) do
-        if container then
-            for _, t in ipairs(container:GetChildren()) do
-                if t:IsA("Tool") and t.ToolTip == "Blox Fruit" then
-                    local nome = t:GetAttribute("OriginalName") or t.Name
-                    obterCommF():InvokeServer("StoreFruit", nome, t)
+do
+    local avisouSkip = false
+    loopToggle("AutoStoreFruit", "Guardar", function()
+        -- não guarda a fruta se você a usa para farmar
+        if Cfg:Get("AutoMasteryFruit") or Cfg:Get("Weapon") == "Blox Fruit" then
+            if not avisouSkip then
+                avisouSkip = true
+                notificar("Guardar fruta", "Pausado: a arma selecionada é a Blox Fruit (troque para Melee/Sword/Gun).")
+            end
+            return 3
+        end
+        avisouSkip = false
+
+        local char = LocalPlayer.Character
+        local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        for _, container in ipairs({ backpack, char }) do
+            if container then
+                for _, t in ipairs(container:GetChildren()) do
+                    if t:IsA("Tool") and t.ToolTip == "Blox Fruit" then
+                        -- fruta equipada não pode ser guardada: desequipa antes
+                        if t.Parent == char and hum then pcall(function() hum:UnequipTools() end) task.wait(0.15) end
+
+                        local nomes, vistos = {}, {}
+                        local function add(n)
+                            if type(n) == "string" and n ~= "" and not vistos[n] then vistos[n] = true table.insert(nomes, n) end
+                        end
+                        add(t:GetAttribute("OriginalName"))
+                        add(t.Name)
+                        add(trim((string.gsub(t.Name, "%s*[Ff][Rr][Uu][Ii][Tt]%s*", " "))))
+
+                        for _, nome in ipairs(nomes) do
+                            local ok, r = pcall(function() return obterCommF():InvokeServer("StoreFruit", nome, t) end)
+                            registrarLog("Guardar", string.format("%s -> %s", nome, ok and tostring(r) or ("erro: " .. tostring(r))))
+                            task.wait(0.4)
+                            if not t.Parent or (t.Parent ~= backpack and t.Parent ~= char) then break end
+                        end
+                    end
                 end
             end
         end
-    end
-    return 3
-end)
+        return 3
+    end)
+end
 
 loopToggle("AutoTweenFruit", "TweenFruta", function()
     local root = meuRoot()
@@ -1036,10 +1090,38 @@ loopToggle("AutoTweenFruit", "TweenFruta", function()
         end
     end
     if melhor then
-        MovementService:Interpola(melhorParte.CFrame, 150, function() return Cfg:Get("AutoTweenFruit") and melhor.Parent ~= nil end)
+        MovementService:Interpola(melhorParte.CFrame + Vector3.new(0, 3, 0), 150, function() return Cfg:Get("AutoTweenFruit") and melhor.Parent ~= nil end)
+        if Cfg:Get("AutoTweenFruit") and melhor.Parent then
+            local pegou = F.pegarFruta(melhor, melhorParte)
+            registrarLog("TweenFruta", (pegou and "Coletou: " or "Não conseguiu coletar: ") .. tostring(melhor.Name))
+        end
     end
-    return 1
+    return 0.5
 end)
+
+-- O Interpola para a ~8 studs do alvo e cancela o tween, então o personagem
+-- nunca encostava na fruta (o pickup do jogo é por toque no Handle).
+-- Aqui encostamos de fato: posiciona em cima do Handle e dispara o toque.
+function F.pegarFruta(fruta, parte)
+    local root = meuRoot()
+    if not root or not fruta or not parte then return false end
+    local antes = Cfg:Get("EmMovimento")
+    Cfg:Set("EmMovimento", true) -- mantém o noclip enquanto encosta
+    for _ = 1, 8 do
+        if not fruta.Parent or not parte.Parent then break end
+        -- +3 studs: os pés ficam na altura do Handle, sem enterrar o corpo no chão
+        pcall(function() root.CFrame = parte.CFrame + Vector3.new(0, 3, 0) end)
+        if firetouchinterest then
+            pcall(function()
+                firetouchinterest(root, parte, 0)
+                firetouchinterest(root, parte, 1)
+            end)
+        end
+        task.wait(0.15)
+    end
+    Cfg:Set("EmMovimento", antes)
+    return not fruta.Parent
+end
 
 function F.trazerTodasFrutas()
     local root = meuRoot()
@@ -1234,26 +1316,105 @@ function F.resgatarCodigos()
     end)
 end
 
+-- Erro 773 = "teleporte para local restrito": o servidor escolhido (ou o modo
+-- de teleporte) foi recusado. Em vez de tentar uma vez só, agora o script
+-- escuta TeleportInitFailed, marca o servidor como ruim e tenta outro.
+local Hop = { ocupado = false, falhos = {} }
+
+local function requisicaoHttp(url)
+    local ok, res = pcall(function() return game:HttpGet(url) end)
+    if ok and type(res) == "string" and res ~= "" then return res end
+    local req = (syn and syn.request) or request or http_request or (http and http.request)
+    if req then
+        local ok2, r = pcall(req, { Url = url, Method = "GET" })
+        if ok2 and type(r) == "table" and type(r.Body) == "string" then return r.Body end
+    end
+    return nil
+end
+
+local function listarServidores()
+    local lista, cursor = {}, nil
+    for _ = 1, 3 do
+        local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId)
+        if cursor then url = url .. "&cursor=" .. cursor end
+        local corpo = requisicaoHttp(url)
+        if not corpo then break end
+        local ok, dados = pcall(function() return HttpService:JSONDecode(corpo) end)
+        if not ok or type(dados) ~= "table" then break end
+        for _, sv in ipairs(dados.data or {}) do
+            if sv.id ~= game.JobId and not Hop.falhos[sv.id]
+                and sv.playing and sv.maxPlayers and sv.playing > 0 and sv.playing < sv.maxPlayers - 2 then
+                table.insert(lista, sv.id)
+            end
+        end
+        cursor = dados.nextPageCursor
+        if type(cursor) ~= "string" then break end
+    end
+    return lista
+end
+
+-- Executa um teleporte e espera ~10s para ver se o Roblox recusou.
+-- Devolve true se aparentemente está em andamento, false + motivo se falhou.
+local function teleportarComRetorno(fn)
+    local falhou = nil
+    local con = TeleportService.TeleportInitFailed:Connect(function(pl, resultado, msg)
+        if pl == LocalPlayer then falhou = tostring(resultado) .. " - " .. tostring(msg) end
+    end)
+    local ok, err = pcall(fn)
+    if not ok then con:Disconnect() return false, tostring(err) end
+    local t0 = os.clock()
+    while os.clock() - t0 < 10 and not falhou do task.wait(0.25) end
+    con:Disconnect()
+    if falhou then return false, falhou end
+    return true
+end
+
 function F.serverHop()
+    if Hop.ocupado then notificar("Server Hop", "Já existe uma troca de servidor em andamento.") return end
+    Hop.ocupado = true
     task.spawn(function()
         local ok, err = pcall(function()
-            local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId)
-            local dados = HttpService:JSONDecode(game:HttpGet(url))
-            local candidatos = {}
-            for _, s in ipairs(dados.data or {}) do
-                if s.id ~= game.JobId and s.playing and s.maxPlayers and s.playing < s.maxPlayers - 1 then
-                    table.insert(candidatos, s.id)
-                end
+            local candidatos = listarServidores()
+            local tentativas = 0
+            while #candidatos > 0 and tentativas < 6 do
+                tentativas = tentativas + 1
+                local i = math.random(#candidatos)
+                local id = table.remove(candidatos, i)
+                local feito, motivo = teleportarComRetorno(function()
+                    TeleportService:TeleportToPlaceInstance(game.PlaceId, id, LocalPlayer)
+                end)
+                if feito then return end
+                Hop.falhos[id] = true
+                registrarLog("ServerHop", "Falhou (" .. tostring(motivo) .. "), tentando outro servidor...")
+                task.wait(1.5)
             end
-            if #candidatos == 0 then error("nenhum servidor disponível", 0) end
-            TeleportService:TeleportToPlaceInstance(game.PlaceId, candidatos[math.random(#candidatos)], LocalPlayer)
+            -- último recurso: deixa o Roblox escolher um servidor
+            notificar("Server Hop", "Tentando entrar em qualquer servidor disponível...")
+            local feito, motivo = teleportarComRetorno(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+            if not feito then error(motivo, 0) end
         end)
+        Hop.ocupado = false
         if not ok then registrarErro("ServerHop", err) notificar("Server Hop", "Falhou: " .. tostring(err)) end
     end)
 end
 
 function F.reentrar()
-    pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+    if Hop.ocupado then return end
+    Hop.ocupado = true
+    task.spawn(function()
+        local estrategias = {
+            function() TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer) end, -- mesmo servidor
+            function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end,                           -- qualquer servidor
+        }
+        for _, fn in ipairs(estrategias) do
+            local feito, motivo = teleportarComRetorno(fn)
+            if feito then break end
+            registrarLog("Rejoin", "Falhou: " .. tostring(motivo))
+            notificar("Rejoin", "Falhou (" .. tostring(motivo) .. "). Tentando outro método...")
+            task.wait(3)
+        end
+        Hop.ocupado = false
+    end)
 end
 
 function F.copiarJobId()
@@ -1269,8 +1430,10 @@ end
 function F.entrarNoServidor()
     local id = trim(Cfg:Get("JobIdAlvo"))
     if id == "" then notificar("Servidor", "Cole um JobId primeiro.") return end
-    local ok, err = pcall(function() TeleportService:TeleportToPlaceInstance(game.PlaceId, id, LocalPlayer) end)
-    if not ok then notificar("Servidor", "Falhou: " .. tostring(err)) end
+    task.spawn(function()
+        local feito, motivo = teleportarComRetorno(function() TeleportService:TeleportToPlaceInstance(game.PlaceId, id, LocalPlayer) end)
+        if not feito then notificar("Servidor", "Falhou: " .. tostring(motivo)) end
+    end)
 end
 
 function F.irParaSea()
@@ -1348,15 +1511,23 @@ end
 function F.irParaFrutaMaisProxima()
     local root = meuRoot()
     if not root then return end
-    local melhor, menor = nil, math.huge
+    local melhor, menor, melhorFruta = nil, math.huge, nil
     for _, f in ipairs(F.frutasNoMapa()) do
         local p = F.parteDe(f)
         if p then
             local d = (p.Position - root.Position).Magnitude
-            if d < menor then menor, melhor = d, p end
+            if d < menor then menor, melhor, melhorFruta = d, p, f end
         end
     end
-    if melhor then teleportar(melhor.CFrame + Vector3.new(0, 4, 0)) else notificar("Frutas", "Nenhuma fruta no mapa agora.") end
+    if melhor then
+        task.spawn(function()
+            local ok, err = pcall(function()
+                MovementService:Interpola(melhor.CFrame + Vector3.new(0, 3, 0), 250)
+                F.pegarFruta(melhorFruta, melhor)
+            end)
+            if not ok then registrarErro("Teleport", err) end
+        end)
+    else notificar("Frutas", "Nenhuma fruta no mapa agora.") end
 end
 
 -- =========================================================================
@@ -1919,13 +2090,43 @@ task.spawn(function()
 
     ScriptJanitor:Adicionar({ Destroy = restaurar }, "Destroy")
 
+    local ultimaSegura, tSegura, fimMov = nil, 0, 0
+
+    -- Sobe aos poucos até sair de dentro do cenário; se não achar saída,
+    -- volta para o último ponto em que o personagem estava livre.
+    local function liberar(char)
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if not root then return end
+        for _ = 1, 25 do
+            if not personagemPreso(char) then return end
+            root.CFrame = root.CFrame + Vector3.new(0, 3, 0)
+            root.AssemblyLinearVelocity = Vector3.zero
+            RunService.Stepped:Wait()
+            pcall(frame, char, true)
+        end
+        if ultimaSegura then
+            root.CFrame = ultimaSegura
+            root.AssemblyLinearVelocity = Vector3.zero
+        end
+    end
+
     while Estado.rodando do
         local char = LocalPlayer.Character
         local auto = Cfg:Get("EmMovimento")
+        if auto then fimMov = os.clock() end
         if (auto or Cfg:Get("NoClipManual")) and char then
             pcall(frame, char, auto)
         elseif next(originais) then
-            restaurar()
+            if char and os.clock() - fimMov < 0.3 then
+                pcall(frame, char, true)            -- folga de 0.3s após o movimento
+            else
+                if char then pcall(liberar, char) end
+                restaurar()
+            end
+        elseif char and os.clock() - tSegura > 0.5 then
+            tSegura = os.clock()
+            local root = char:FindFirstChild("HumanoidRootPart")
+            if root and not personagemPreso(char) then ultimaSegura = root.CFrame end
         end
         RunService.Stepped:Wait()
     end
@@ -1993,7 +2194,7 @@ task.spawn(function()
         ScriptJanitor:Adicionar(overlay.ChildAdded:Connect(function(c)
             if c.Name == "ErrorPrompt" and Cfg:Get("AutoRejoin") then
                 task.wait(2)
-                pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+                F.reentrar() -- já ignora se houver teleporte em andamento
             end
         end))
     end)
@@ -2338,7 +2539,6 @@ local function tornarArrastavel(frame, alca)
             local d = input.Position - dragStart
             local pai = frame.Parent
             local tela = pai and pai.AbsoluteSize or Vector2.new(1280, 720)
-            local tam = frame.AbsoluteSize
             local nx = math.clamp(startPos.X.Offset + d.X, 0, math.max(0, tela.X - 80))
             local ny = math.clamp(startPos.Y.Offset + d.Y, 0, math.max(0, tela.Y - 40))
             frame.Position = UDim2.fromOffset(nx, ny)
