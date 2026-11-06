@@ -1,12 +1,6 @@
 -- =========================================================================
---   AUTOMATA HUB v13.3 - BLOX FRUITS
+--   AUTOMATA HUB v13.4 - BLOX FRUITS
 -- =========================================================================
--- AVISO: as partes específicas do jogo (remotes, nomes de pastas, bosses,
--- ID da lua, nomes das ilhas de evento) vêm de scripts da comunidade e NÃO
--- foram testadas no jogo. Tudo roda dentro de pcall: se algo falhar, o
--- console (F9) mostra o motivo e o resto do script continua funcionando.
--- Ajuste as CONSTANTES abaixo se o jogo mudar.
---
 -- NOVIDADES v13.0
 --  * UI própria com abas na ESQUERDA (o Rayfield foi removido)
 --  * Seleção de Sea (1/2/3) + viagem entre seas
@@ -18,7 +12,7 @@
 --    resultado do Fruit Sniper + botão de teste do Webhook
 --  * Loja (estilos de luta, haki), jogador (speed, pulo infinito...), etc.
 
-local VERSAO = "13.3"
+local VERSAO = "13.4"
 
 -- =========================================================================
 -- LOG / SERVIÇOS
@@ -197,7 +191,7 @@ if genv["Automata_Hub_Janitor_v12"] then pcall(function() genv["Automata_Hub_Jan
 genv[ID_UNICO_SCRIPT] = Janitor.new()
 local ScriptJanitor = genv[ID_UNICO_SCRIPT]
 
-local Estado = { rodando = true, modo = "ocioso", inicio = os.clock() }
+local Estado = { rodando = true, modo = "ocioso", inicio = os.clock(), pausa = false }
 
 -- =========================================================================
 -- CONFIGURAÇÃO
@@ -236,8 +230,9 @@ do
         AutoStatGun = false, AutoStatFruit = false, QuantidadePontos = 1,
         -- Teleport
         IlhaSelecionada = nil, NpcSelecionado = nil,
-        -- Loja
-        EstiloSelecionado = "Superhuman",
+        -- Loja / Progressão
+        EstiloSelecionado = "Superhuman", AutoComprarEstilos = false, VoltarDepoisCompra = true,
+        UsarEstiloFarm = false, EstiloFarm = nil, VendedorNotifier = true,
         -- Avisos / Eventos
         FullMoonNotifier = true, BossNotifier = false,
         MirageNotifier = true, KitsuneNotifier = true, PrehistoricNotifier = true,
@@ -446,6 +441,13 @@ function CombatManager:ObterAlvo(pastas, filtro, raio)
 end
 
 local function escolherFerramenta(char, backpack, tooltip)
+    -- treino de maestria: com a arma "Melee", usa o estilo escolhido na aba Progressão
+    if tooltip == "Melee" and Cfg:Get("UsarEstiloFarm") and type(Cfg:Get("EstiloFarm")) == "string" then
+        for _, container in ipairs({ char, backpack }) do
+            local t = container:FindFirstChild(Cfg:Get("EstiloFarm"))
+            if t and t:IsA("Tool") then return t end
+        end
+    end
     if tooltip then
         for _, container in ipairs({ char, backpack }) do
             for _, t in ipairs(container:GetChildren()) do
@@ -575,7 +577,15 @@ local function personagemPreso(char)
         local c = Workspace:FindFirstChild("Characters")
         if c then table.insert(excluir, c) end
         ParamsColisao.FilterDescendantsInstances = excluir
-        return #Workspace:GetPartBoundsInBox(root.CFrame, Vector3.new(2.2, 5, 1.4), ParamsColisao) > 0
+        local partes = Workspace:GetPartBoundsInBox(root.CFrame, Vector3.new(2.2, 5, 1.4), ParamsColisao)
+        for _, p in ipairs(partes) do
+            -- só conta peça SÓLIDA de verdade: zonas/marcadores (CanCollide=false),
+            -- terreno/água e o plano do mar não prendem ninguém
+            if p.CanCollide and not p:IsA("Terrain") and p.Name ~= "WaterBase-Plane" then
+                return true
+            end
+        end
+        return false
     end)
     return ok and res == true
 end
@@ -619,23 +629,29 @@ function MovementService:Interpola(destino, velocidade, aindaAtivo)
     return root.Parent ~= nil and (root.Position - destino.Position).Magnitude <= 8
 end
 
--- Teleporte em 3 fases para não "mergulhar" na diagonal: sobe na vertical,
--- atravessa no alto e só então desce até o destino.
+-- Viagem em 3 fases (BLOQUEANTE): sobe -> atravessa no alto -> desce.
+-- Devolve true se chegou ao destino.
+local function viajar(cf, velocidade)
+    local v = velocidade or 250
+    -- espera outro movimento terminar (até 20s)
+    local t0 = os.clock()
+    while MovementService._ocupado and os.clock() - t0 < 20 do task.wait(0.2) end
+    local root = meuRoot()
+    if not root then return false end
+    local ini, alvo = root.Position, cf.Position
+    local horizontal = Vector3.new(ini.X - alvo.X, 0, ini.Z - alvo.Z).Magnitude
+    if horizontal > 120 then
+        local alt = math.max(ini.Y, alvo.Y) + 150
+        if not MovementService:Interpola(CFrame.new(ini.X, alt, ini.Z), v) then return false end
+        if not MovementService:Interpola(CFrame.new(alvo.X, alt, alvo.Z), v) then return false end
+    end
+    return MovementService:Interpola(cf, v)
+end
+F.viajar = viajar
+
 local function teleportar(cf, velocidade)
     task.spawn(function()
-        local v = velocidade or 250
-        local ok, res = pcall(function()
-            local root = meuRoot()
-            if not root then return false end
-            local ini, alvo = root.Position, cf.Position
-            local horizontal = Vector3.new(ini.X - alvo.X, 0, ini.Z - alvo.Z).Magnitude
-            if horizontal > 120 then
-                local alt = math.max(ini.Y, alvo.Y) + 150
-                if not MovementService:Interpola(CFrame.new(ini.X, alt, ini.Z), v) then return false end
-                if not MovementService:Interpola(CFrame.new(alvo.X, alt, alvo.Z), v) then return false end
-            end
-            return MovementService:Interpola(cf, v)
-        end)
+        local ok, res = pcall(viajar, cf, velocidade)
         if not ok then
             registrarErro("Teleport", res)
         elseif not res then
@@ -810,7 +826,7 @@ local function combater(modo, alvo, char, myRoot, myHum, backpack)
     local rootAlvo = alvo:FindFirstChild("HumanoidRootPart")
     local humAlvo = alvo:FindFirstChildOfClass("Humanoid")
     if not rootAlvo or not humAlvo then return end
-    local ativo = function() return modoAtivo(modo) end
+    local ativo = function() return modoAtivo(modo) and not Estado.pausa end
 
     local dist = tonumber(Cfg:Get("AttackDistance")) or 6.5
     local destino = rootAlvo.CFrame * CFrame.new(0, dist, 0)
@@ -878,7 +894,7 @@ end
 
 task.spawn(function()
     while Estado.rodando do
-        if algumModoAtivo() then
+        if algumModoAtivo() and not Estado.pausa then
             local ok, err = pcall(cicloCombate)
             if not ok then registrarErro("Combate", err) end
         else
@@ -1070,7 +1086,13 @@ do
             if Cfg:Get("AutoRandomFruit") then
                 local ok, err = pcall(function()
                     local invAntes, mochAntes = contarFrutas()
-                    local r = obterCommF():InvokeServer("Cousin", "Buy")
+                    -- a compra só funciona perto do NPC do gacha: vai até ele, compra e volta
+                    local feito, r, achou = F.comNpc({ "cousin", "gacha" }, function()
+                        return obterCommF():InvokeServer("Cousin", "Buy")
+                    end)
+                    if not achou then
+                        registrarLog("Fruta", "NPC do gacha não encontrado no mapa; tentei comprar mesmo assim")
+                    end
                     task.wait(2)
                     local invDepois, mochDepois = contarFrutas()
                     local ganhou = (invAntes and invDepois and invDepois > invAntes) or mochDepois > mochAntes
@@ -1079,7 +1101,7 @@ do
                         notificar("Random Fruit", "Fruta comprada! Próxima tentativa conforme o intervalo.")
                         esperarAtivo("AutoRandomFruit", tonumber(Cfg:Get("IntervaloFruta")) or 7200)
                     else
-                        notificar("Random Fruit", "Não comprou (resposta: " .. tostring(r) .. "). Nova tentativa em 5 min.")
+                        notificar("Random Fruit", "Não comprou (resposta: " .. tostring(r) .. ")" .. (achou and "" or " [NPC do gacha não encontrado]") .. ". Nova tentativa em 5 min.")
                         esperarAtivo("AutoRandomFruit", 300)
                     end
                 end)
@@ -1148,6 +1170,7 @@ do
 end
 
 loopToggle("AutoTweenFruit", "TweenFruta", function()
+    if Estado.pausa then return 0.5 end
     local root = meuRoot()
     if not root then return 1 end
     local melhor, menor, melhorParte = nil, math.huge, nil
@@ -1160,7 +1183,7 @@ loopToggle("AutoTweenFruit", "TweenFruta", function()
     end
     if melhor then
         -- a Tool pode só mudar de pai ao ser coletada: "no mapa" = filha do Workspace
-        local ativo = function() return Cfg:Get("AutoTweenFruit") and melhor.Parent == Workspace end
+        local ativo = function() return Cfg:Get("AutoTweenFruit") and melhor.Parent == Workspace and not Estado.pausa end
         local chegou = MovementService:Interpola(melhorParte.CFrame + Vector3.new(0, 3, 0), 150, ativo)
         -- só encosta se o tween realmente chegou (evita teleporte direto de longe)
         if chegou and ativo() then
@@ -1515,17 +1538,343 @@ function F.irParaSea()
     F.invocar("Sea", TRAVEL_REMOTES[alvo])
 end
 
-function F.comprarEstilo()
-    local remote = ESTILOS[Cfg:Get("EstiloSelecionado")]
-    if not remote then notificar("Loja", "Escolha um estilo primeiro.") return end
-    F.invocar("Loja", remote)
-end
+-- =========================================================================
+-- PROGRESSÃO: ESTILOS DE LUTA, ESPADAS LENDÁRIAS E VENDEDORES RAROS
+-- =========================================================================
+do
+    -- Estilos de luta. req = { {estilo, maestria mínima} }. Valores APROXIMADOS:
+    -- confira no jogo (o servidor é quem decide se a compra vale).
+    -- "extra" = quest/itens que o script NÃO consegue fazer sozinho.
+    local TODOS400 = { { "Superhuman", 400 }, { "Death Step", 400 }, { "Sharkman Karate", 400 },
+                       { "Electric Claw", 400 }, { "Dragon Talon", 400 } }
+    local ESTILOS_LISTA = {
+        { nome = "Black Leg", remote = "BuyBlackLeg", beli = 150000, npc = { "dark step", "black leg" } },
+        { nome = "Electro", remote = "BuyElectro", beli = 500000, npc = { "scientist", "electro" } },
+        { nome = "Fishman Karate", remote = "BuyFishmanKarate", beli = 750000, npc = { "kung", "fishman karate" } },
+        { nome = "Dragon Claw", remote = "BuyDragonClaw", frag = 1500, npc = { "dragon claw" } },
+        { nome = "Superhuman", remote = "BuySuperhuman", beli = 3000000,
+          req = { { "Black Leg", 300 }, { "Electro", 300 }, { "Fishman Karate", 300 }, { "Dragon Claw", 300 } },
+          npc = { "martial", "superhuman" } },
+        { nome = "Death Step", remote = "BuyDeathStep", beli = 2500000, frag = 5000,
+          req = { { "Black Leg", 400 } }, extra = "Library Key (Awakened Ice Admiral)", npc = { "death step" } },
+        { nome = "Sharkman Karate", remote = "BuySharkmanKarate", beli = 2500000, frag = 5000,
+          req = { { "Fishman Karate", 400 } }, extra = "Water Key (Tide Keeper)", npc = { "sharkman" } },
+        { nome = "Electric Claw", remote = "BuyElectricClaw", beli = 3000000, frag = 5000,
+          req = { { "Electro", 400 } }, extra = "Sea 3", npc = { "previous hero", "electric claw" } },
+        { nome = "Dragon Talon", remote = "BuyDragonTalon", beli = 3000000, frag = 5000,
+          req = { { "Dragon Claw", 400 } }, extra = "Fire Essence", npc = { "dragon talon", "uzoth" } },
+        { nome = "Godhuman", remote = "BuyGodhuman", beli = 5000000, frag = 5000,
+          req = TODOS400, extra = "materiais (Fish Tail, Magma Ore, Dragon Scale, Mystic Droplet)", npc = { "godhuman" } },
+        { nome = "Sanguine Art", remote = "BuySanguineArt", req = TODOS400,
+          extra = "materiais do Sea 3 (veja no jogo)", npc = { "sanguine" } },
+    }
 
-function F.listaEstilos()
-    local l = {}
-    for nome in pairs(ESTILOS) do table.insert(l, nome) end
-    table.sort(l)
-    return l
+    local ESPADAS_LENDARIAS = {   -- a ordem 1/2/3 pode variar: confira a resposta do jogo
+        { nome = "Shisui", id = "1" }, { nome = "Saddi", id = "2" }, { nome = "Wando", id = "3" },
+    }
+
+    -- raro = true: não fica sempre disponível (aviso quando spawnar)
+    local VENDEDORES = {
+        { chave = "LegendarySword", nome = "Legendary Sword Dealer", npc = { "legendary sword" }, raro = true },
+        { chave = "HakiColor", nome = "Haki Color Dealer", npc = { "haki color", "color dealer" }, raro = true },
+        { chave = "AdvancedFruit", nome = "Advanced Fruit Dealer (Mirage)", npc = { "advanced fruit" }, raro = true },
+        { chave = "BloxFruit", nome = "Blox Fruit Dealer", npc = { "blox fruit dealer", "fruit dealer" }, raro = false },
+    }
+
+    local function fmtNum(n)
+        local s = tostring(math.floor(tonumber(n) or 0))
+        s = string.reverse(s)
+        s = string.gsub(s, "(%d%d%d)", "%1.")
+        s = string.reverse(s)
+        s = string.gsub(s, "^%.", "")
+        return s
+    end
+
+    local function dadosJogador()
+        local d = LocalPlayer:FindFirstChild("Data")
+        local b = d and d:FindFirstChild("Beli")
+        local f = d and d:FindFirstChild("Fragments")
+        return b and tonumber(b.Value) or 0, f and tonumber(f.Value) or 0
+    end
+
+    -- inventário (cache atualizado em segundo plano, no máx. a cada 20s)
+    local invCache, invT = {}, -999
+    local function atualizarInventarioAsync()
+        if os.clock() - invT < 20 then return end
+        invT = os.clock()
+        task.spawn(function()
+            local ok, inv = pcall(function() return obterCommF():InvokeServer("getInventory") end)
+            if ok and type(inv) == "table" then
+                local nomes = {}
+                for _, item in pairs(inv) do
+                    local n = item
+                    if type(item) == "table" then n = item.Name or item.name end
+                    if type(n) == "string" then nomes[n] = true end
+                end
+                invCache = nomes
+            end
+        end)
+    end
+
+    -- NPCs: Workspace.NPCs + modelos com Humanoid soltos no Workspace.
+    -- Procura primeiro pelo nome EXATO e depois por "contém"; devolve o mais perto.
+    function F.acharNpc(palavras)
+        local root = meuRoot()
+        local candidatos = {}
+        local pasta = Workspace:FindFirstChild("NPCs")
+        if pasta then for _, c in ipairs(pasta:GetChildren()) do table.insert(candidatos, c) end end
+        for _, c in ipairs(Workspace:GetChildren()) do
+            if c:IsA("Model") and c:FindFirstChildOfClass("Humanoid") and not Players:GetPlayerFromCharacter(c) then
+                table.insert(candidatos, c)
+            end
+        end
+        for _, exato in ipairs({ true, false }) do
+            local melhor, menor = nil, math.huge
+            for _, c in ipairs(candidatos) do
+                if not c:IsA("Tool") then
+                    local n = string.lower(c.Name)
+                    for _, p in ipairs(palavras) do
+                        if (exato and n == p) or (not exato and string.find(n, p, 1, true)) then
+                            local cf = pivotDe(c)
+                            if cf then
+                                local d = root and (cf.Position - root.Position).Magnitude or 0
+                                if d < menor then menor, melhor = d, c end
+                            end
+                            break
+                        end
+                    end
+                end
+            end
+            if melhor then return melhor, menor end
+        end
+        return nil, nil
+    end
+
+    -- Vai até o NPC (se achar), pausa as automações, executa acao() e volta.
+    -- Devolve: ok, resultado_ou_erro, achouNpc
+    function F.comNpc(palavras, acao)
+        local root = meuRoot()
+        if not root then return false, "sem personagem", false end
+        local origem = root.CFrame
+        local npc = F.acharNpc(palavras)
+        local resultado = nil
+        Estado.pausa = true
+        local ok, err = pcall(function()
+            if npc then
+                local cf = pivotDe(npc)
+                if cf and not viajar(cf + Vector3.new(0, 4, 0), 250) then
+                    error("não consegui chegar até o NPC", 0)
+                end
+            end
+            task.wait(0.5)
+            resultado = acao()
+            task.wait(0.3)
+            if npc and Cfg:Get("VoltarDepoisCompra") then viajar(origem, 250) end
+        end)
+        Estado.pausa = false
+        if not ok then return false, tostring(err), npc ~= nil end
+        return true, resultado, npc ~= nil
+    end
+
+    -- Tudo que você possui: Tools (estilos/espadas) + inventário. Devolve (set, maestria)
+    function F.possuidos()
+        atualizarInventarioAsync()
+        local set, mast = {}, {}
+        for nome in pairs(invCache) do set[nome] = true end
+        for _, pasta in ipairs({ LocalPlayer:FindFirstChildOfClass("Backpack"), LocalPlayer.Character }) do
+            if pasta then
+                for _, t in ipairs(pasta:GetChildren()) do
+                    if t:IsA("Tool") then
+                        set[t.Name] = true
+                        local lv = t:FindFirstChild("Level")
+                        if lv and type(lv.Value) == "number" then mast[t.Name] = lv.Value end
+                    end
+                end
+            end
+        end
+        return set, mast
+    end
+
+    local function estiloPorNome(nome)
+        for _, e in ipairs(ESTILOS_LISTA) do
+            if e.nome == nome then return e end
+        end
+        return nil
+    end
+
+    function F.textoEstilos()
+        local tenho, mast = F.possuidos()
+        local beli, frag = dadosJogador()
+        local linhas = {}
+        for _, e in ipairs(ESTILOS_LISTA) do
+            if tenho[e.nome] then
+                table.insert(linhas, string.format("[TENHO] %s (maestria %s)", e.nome, mast[e.nome] and tostring(mast[e.nome]) or "?"))
+            else
+                local falta = {}
+                for _, rq in ipairs(e.req or {}) do
+                    local m = mast[rq[1]]
+                    if (m or 0) < rq[2] then
+                        table.insert(falta, string.format("%s %s/%d", rq[1], m and tostring(m) or "?", rq[2]))
+                    end
+                end
+                if e.beli and beli < e.beli then table.insert(falta, "Beli " .. fmtNum(beli) .. "/" .. fmtNum(e.beli)) end
+                if e.frag and frag < e.frag then table.insert(falta, "Frag " .. fmtNum(frag) .. "/" .. fmtNum(e.frag)) end
+                if e.extra then table.insert(falta, "quest/itens: " .. e.extra) end
+                local estado = (#falta == 0) and "PRONTO PARA COMPRAR" or ("falta: " .. table.concat(falta, ", "))
+                table.insert(linhas, string.format("[FALTA] %s - %s", e.nome, estado))
+            end
+        end
+        return table.concat(linhas, "\n") .. "\n(valores aproximados; quem decide é o jogo)"
+    end
+
+    function F.listaEstilosFaltando()
+        local tenho = F.possuidos()
+        local l = {}
+        for _, e in ipairs(ESTILOS_LISTA) do
+            if not tenho[e.nome] then table.insert(l, e.nome) end
+        end
+        if #l == 0 then return { "(você já tem todos)" } end
+        return l
+    end
+
+    function F.listaEstilosTenho()
+        local tenho = F.possuidos()
+        local l = { "Combat" }
+        for _, e in ipairs(ESTILOS_LISTA) do
+            if tenho[e.nome] then table.insert(l, e.nome) end
+        end
+        return l
+    end
+
+    -- Compra (BLOQUEANTE): vai até o NPC ensinador, compra e confere nas Tools
+    function F.comprarEstiloPorNome(nome)
+        local e = estiloPorNome(nome)
+        if not e then notificar("Estilos", "Escolha um estilo que falta primeiro.") return false end
+        if F.possuidos()[e.nome] then notificar("Estilos", "Você já tem o " .. e.nome .. ".") return true end
+        local feito, r, achou = F.comNpc(e.npc, function() return obterCommF():InvokeServer(e.remote) end)
+        task.wait(1.5)
+        if F.possuidos()[e.nome] then
+            F.avisar("Estilo comprado!", e.nome .. " foi liberado no seu personagem.", 5763719)
+            return true
+        end
+        local msg = "Não consegui comprar " .. e.nome .. ". Resposta do jogo: " .. tostring(r)
+        if not achou then msg = msg .. ". NPC ensinador não encontrado: vá até ele e tente de novo" end
+        notificar("Estilos", msg)
+        registrarLog("Estilos", msg)
+        return false
+    end
+
+    function F.comprarEstilo()
+        local nome = Cfg:Get("EstiloSelecionado")
+        task.spawn(F.comprarEstiloPorNome, nome)
+    end
+
+    -- Auto compra: só estilos sem quest "extra" cujos requisitos (maestria/Beli/Frag) já bateram
+    do
+        local ultima = {}
+        loopToggle("AutoComprarEstilos", "Estilos", function()
+            local tenho, mast = F.possuidos()
+            local beli, frag = dadosJogador()
+            for _, e in ipairs(ESTILOS_LISTA) do
+                if not tenho[e.nome] and not e.extra and os.clock() - (ultima[e.nome] or -9999) > 600 then
+                    local pronto = true
+                    for _, rq in ipairs(e.req or {}) do
+                        if (mast[rq[1]] or 0) < rq[2] then pronto = false end
+                    end
+                    if e.beli and beli < e.beli then pronto = false end
+                    if e.frag and frag < e.frag then pronto = false end
+                    if pronto then
+                        ultima[e.nome] = os.clock()
+                        F.comprarEstiloPorNome(e.nome)
+                        return 5
+                    end
+                end
+            end
+            return 30
+        end)
+    end
+
+    -- Espadas lendárias ------------------------------------------------------
+    function F.textoEspadas()
+        local tenho = F.possuidos()
+        local linhas = {}
+        for _, e in ipairs(ESPADAS_LENDARIAS) do
+            table.insert(linhas, (tenho[e.nome] and "[TENHO] " or "[FALTA] ") .. e.nome)
+        end
+        return table.concat(linhas, "\n") .. "\nO Legendary Sword Dealer só vende quando está spawnado."
+    end
+
+    function F.comprarEspada(i)
+        task.spawn(function()
+            local e = ESPADAS_LENDARIAS[i]
+            if not e then return end
+            if F.possuidos()[e.nome] then notificar("Espadas", "Você já tem a " .. e.nome .. ".") return end
+            if not F.acharNpc({ "legendary sword" }) then
+                notificar("Espadas", "O Legendary Sword Dealer não está spawnado agora.")
+                return
+            end
+            local feito, r = F.comNpc({ "legendary sword" }, function()
+                return obterCommF():InvokeServer("LegendarySwordDealer", e.id)
+            end)
+            task.wait(1.5)
+            if F.possuidos()[e.nome] then
+                F.avisar("Espada comprada!", e.nome .. " foi comprada no Legendary Sword Dealer.", 5763719)
+            else
+                notificar("Espadas", "Não comprou a " .. e.nome .. ". Resposta do jogo: " .. tostring(r))
+            end
+        end)
+    end
+
+    -- Vendedores raros ---------------------------------------------------------
+    function F.textoVendedores()
+        local l = {}
+        for _, v in ipairs(VENDEDORES) do
+            local npc, dist = F.acharNpc(v.npc)
+            if npc then
+                table.insert(l, string.format("%s: SPAWNADO (a %.0f studs)", v.nome, dist or 0))
+            else
+                table.insert(l, v.nome .. ": não encontrado" .. (v.raro and " (não spawnou)" or ""))
+            end
+        end
+        return table.concat(l, "\n")
+    end
+
+    function F.irParaVendedor(chave)
+        for _, v in ipairs(VENDEDORES) do
+            if v.chave == chave then
+                local npc = F.acharNpc(v.npc)
+                local cf = npc and pivotDe(npc)
+                if cf then teleportar(cf + Vector3.new(0, 4, 0)) else notificar("Vendedores", v.nome .. " não está spawnado agora.") end
+                return
+            end
+        end
+    end
+
+    task.spawn(function()
+        local presente = {}
+        while Estado.rodando do
+            if Cfg:Get("VendedorNotifier") then
+                for _, v in ipairs(VENDEDORES) do
+                    if v.raro then
+                        local ok, err = pcall(function()
+                            local npc, dist = F.acharNpc(v.npc)
+                            local existe = npc ~= nil
+                            if existe and not presente[v.chave] then
+                                F.avisar(v.nome .. " spawnou!", string.format("%s está no mapa (a %.0f studs de você).", v.nome, dist or 0), 3066993)
+                            elseif not existe and presente[v.chave] then
+                                F.avisar(v.nome .. " sumiu", v.nome .. " não está mais no mapa.", 8421504)
+                            end
+                            presente[v.chave] = existe
+                        end)
+                        if not ok then registrarErro("Vendedor", err) end
+                    end
+                end
+            else
+                table.clear(presente)
+            end
+            task.wait(10)
+        end
+    end)
 end
 
 -- =========================================================================
@@ -2227,7 +2576,9 @@ task.spawn(function()
             RunService.Stepped:Wait()
             pcall(frame, char, true)
         end
-        if ultimaSegura then
+        -- só volta ao último ponto livre se ele for PERTO (antes puxava de volta
+        -- para onde você estava antes de um teleporte longo)
+        if ultimaSegura and (ultimaSegura.Position - root.Position).Magnitude < 150 then
             root.CFrame = ultimaSegura
             root.AssemblyLinearVelocity = Vector3.zero
         end
@@ -2259,7 +2610,7 @@ end)
 -- CHEST HOP
 -- =========================================================================
 local visitados = setmetatable({}, { __mode = "k" })
-local function chestAtivo() return Cfg:Get("ChestHop") end
+local function chestAtivo() return Cfg:Get("ChestHop") and not Estado.pausa end
 
 local function cicloBaus()
     local myRoot = meuRoot()
@@ -2497,9 +2848,30 @@ local CONTROLES = {
     { aba = "Teleport", tipo = "botao", nome = "Viajar para o Sea selecionado", acao = F.irParaSea },
     { aba = "Teleport", tipo = "botao", nome = "Definir ponto de spawn aqui", acao = function() F.invocar("Spawn", "SetSpawnPoint") end },
 
+    -- PROGRESSÃO
+    { aba = "Progressão", tipo = "secao", nome = "Estilos de luta" },
+    { aba = "Progressão", tipo = "info", texto = F.textoEstilos },
+    { aba = "Progressão", tipo = "dropdown", nome = "Estilo que falta", chave = "EstiloSelecionado", opcoes = F.listaEstilosFaltando },
+    { aba = "Progressão", tipo = "botao", nome = "Comprar estilo selecionado (vai até o NPC)", acao = F.comprarEstilo },
+    { aba = "Progressão", tipo = "toggle", nome = "Comprar sozinho os estilos já liberados", chave = "AutoComprarEstilos" },
+    { aba = "Progressão", tipo = "toggle", nome = "Voltar ao ponto de origem depois de comprar", chave = "VoltarDepoisCompra" },
+    { aba = "Progressão", tipo = "secao", nome = "Treinar maestria" },
+    { aba = "Progressão", tipo = "dropdown", nome = "Estilo para treinar", chave = "EstiloFarm", opcoes = F.listaEstilosTenho },
+    { aba = "Progressão", tipo = "toggle", nome = "Usar este estilo nos farms (arma Melee)", chave = "UsarEstiloFarm" },
+    { aba = "Progressão", tipo = "info", texto = "Com a arma \"Melee\" selecionada na aba Main, ligue Auto Farm Level / Nearest: o farm vai usar o estilo escolhido aqui e subir a maestria dele. As quests com chave/itens (Library Key, Water Key, Fire Essence...) você ainda faz manualmente." },
+    { aba = "Progressão", tipo = "secao", nome = "Espadas lendárias" },
+    { aba = "Progressão", tipo = "info", texto = F.textoEspadas },
+    { aba = "Progressão", tipo = "botao", nome = "Comprar Shisui", acao = function() F.comprarEspada(1) end },
+    { aba = "Progressão", tipo = "botao", nome = "Comprar Saddi", acao = function() F.comprarEspada(2) end },
+    { aba = "Progressão", tipo = "botao", nome = "Comprar Wando", acao = function() F.comprarEspada(3) end },
+    { aba = "Progressão", tipo = "secao", nome = "Vendedores (spawn)" },
+    { aba = "Progressão", tipo = "info", texto = F.textoVendedores },
+    { aba = "Progressão", tipo = "botao", nome = "Ir até o Legendary Sword Dealer", acao = function() F.irParaVendedor("LegendarySword") end },
+    { aba = "Progressão", tipo = "botao", nome = "Ir até o Haki Color Dealer", acao = function() F.irParaVendedor("HakiColor") end },
+    { aba = "Progressão", tipo = "botao", nome = "Ir até o Advanced Fruit Dealer", acao = function() F.irParaVendedor("AdvancedFruit") end },
+    { aba = "Progressão", tipo = "toggle", nome = "Avisar quando um vendedor raro spawnar", chave = "VendedorNotifier" },
+
     -- LOJA
-    { aba = "Loja", tipo = "dropdown", nome = "Estilo de luta", chave = "EstiloSelecionado", opcoes = F.listaEstilos },
-    { aba = "Loja", tipo = "botao", nome = "Comprar estilo selecionado", acao = F.comprarEstilo },
     { aba = "Loja", tipo = "secao", nome = "Haki / Habilidades" },
     { aba = "Loja", tipo = "botao", nome = "Comprar Geppo", acao = function() F.invocar("Loja", "BuyHaki", "Geppo") end },
     { aba = "Loja", tipo = "botao", nome = "Comprar Buso Haki", acao = function() F.invocar("Loja", "BuyHaki", "Buso") end },
