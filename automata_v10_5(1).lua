@@ -1,5 +1,5 @@
 -- =========================================================================
---   AUTOMATA HUB v13.1 - BLOX FRUITS
+--   AUTOMATA HUB v13.2 - BLOX FRUITS
 -- =========================================================================
 -- AVISO: as partes específicas do jogo (remotes, nomes de pastas, bosses,
 -- ID da lua, nomes das ilhas de evento) vêm de scripts da comunidade e NÃO
@@ -18,7 +18,7 @@
 --    resultado do Fruit Sniper + botão de teste do Webhook
 --  * Loja (estilos de luta, haki), jogador (speed, pulo infinito...), etc.
 
-local VERSAO = "13.1"
+local VERSAO = "13.2"
 
 -- =========================================================================
 -- LOG / SERVIÇOS
@@ -1525,11 +1525,53 @@ function F.acharIlhaEvento(ev)
     return nil
 end
 
+-- Descobre onde pousar: lança um raio de cima para baixo na posição (X, Z) do
+-- destino e devolve um ponto 6 studs acima do 1º chão (ou da água) encontrado.
+-- Os marcadores de Locations costumam ficar em Y baixo/aleatório; usar só
+-- "pivô + 50" deixava o personagem debaixo d'água.
+function F.pontoSeguroAcima(pos, permitirSubmerso)
+    local mapa = Workspace:FindFirstChild("Map")
+    local plano = mapa and mapa:FindFirstChild("WaterBase-Plane")
+    local nivelAgua = plano and (plano.Position.Y + plano.Size.Y / 2) or nil
+
+    local excluir = {}
+    if LocalPlayer.Character then table.insert(excluir, LocalPlayer.Character) end
+    local e = Workspace:FindFirstChild("Enemies")
+    if e then table.insert(excluir, e) end
+    local c = Workspace:FindFirstChild("Characters")
+    if c then table.insert(excluir, c) end
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.IgnoreWater = true
+    pcall(function() params.RespectCanCollide = false end)
+
+    local topo = math.max(pos.Y, nivelAgua or pos.Y) + 300
+    local origem = Vector3.new(pos.X, topo, pos.Z)
+    for _ = 1, 12 do
+        params.FilterDescendantsInstances = excluir
+        local r = Workspace:Raycast(origem, Vector3.new(0, -(topo + 2000), 0), params)
+        if not r then break end
+        -- ignora zonas/barreiras invisíveis (a água do mapa não conta como invisível)
+        if r.Instance.Transparency >= 0.95 and r.Instance.Name ~= "WaterBase-Plane" then
+            table.insert(excluir, r.Instance)
+        else
+            local y = r.Position.Y
+            -- acertou o fundo do mar (a água não é "consultável"): fica na superfície
+            if nivelAgua and y < nivelAgua - 2 and not permitirSubmerso then y = nivelAgua end
+            return CFrame.new(pos.X, y + 6, pos.Z)
+        end
+    end
+    return nil
+end
+
 function F.irParaIlhaEvento(ev)
     local ilha = F.acharIlhaEvento(ev)
     local cf = pivotDe(ilha)
     if not cf then notificar("Evento", ev.titulo .. " não está no servidor agora.") return end
-    teleportar(cf + Vector3.new(0, 120, 0))
+    local destino = F.pontoSeguroAcima(cf.Position, false) or (cf + Vector3.new(0, 120, 0))
+    registrarLog("Teleport", string.format("%s: marcador Y=%.0f -> destino Y=%.0f", ev.titulo, cf.Position.Y, destino.Position.Y))
+    teleportar(destino)
 end
 
 function F.listarIlhas()
@@ -1549,7 +1591,12 @@ end
 function F.irParaIlhaSelecionada()
     local locs, nome = locations(), Cfg:Get("IlhaSelecionada")
     local ilha = locs and nome and locs:FindFirstChild(nome)
-    if ilha then teleportar(ilha:GetPivot() + Vector3.new(0, 50, 0)) else notificar("Teleport", "Escolha uma ilha primeiro.") end
+    local cf = pivotDe(ilha)
+    if not cf then notificar("Teleport", "Escolha uma ilha primeiro.") return end
+    local submerso = string.find(string.lower(tostring(nome)), "underwater", 1, true) ~= nil
+    local destino = F.pontoSeguroAcima(cf.Position, submerso) or (cf + Vector3.new(0, 50, 0))
+    registrarLog("Teleport", string.format("%s: marcador Y=%.0f -> destino Y=%.0f", tostring(nome), cf.Position.Y, destino.Position.Y))
+    teleportar(destino)
 end
 
 function F.irParaNpcSelecionado()
