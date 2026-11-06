@@ -1,6 +1,28 @@
 -- =========================================================================
---   AUTOMATA HUB v13.4 - BLOX FRUITS
+--   AUTOMATA HUB v13.6 - BLOX FRUITS
 -- =========================================================================
+-- AVISO: as partes específicas do jogo (remotes, nomes de pastas, bosses,
+-- ID da lua, nomes das ilhas de evento) vêm de scripts da comunidade e NÃO
+-- foram testadas no jogo. Tudo roda dentro de pcall: se algo falhar, o
+-- console (F9) mostra o motivo e o resto do script continua funcionando.
+-- Ajuste as CONSTANTES abaixo se o jogo mudar.
+--
+-- NOVIDADES v13.6 (correções feitas lendo o código; nada foi testado no jogo)
+--  * A busca de NPCs deixou de varrer o Workspace inteiro a cada 15s (causava
+--    travadas): agora há um índice de modelos com Humanoid, montado uma vez e
+--    mantido por eventos (DescendantAdded / DescendantRemoving).
+--  * Diagnóstico de NPCs: relatório completo copiado para a área de
+--    transferência (e gravado em automata_diagnostico.txt, se o executor
+--    permitir), com busca por nome em TODAS as instâncias do Workspace e do
+--    ReplicatedStorage, mostrando classe e caminho completo.
+--  * "Procurar NPC por nome" também tenta qualquer instância com aquele nome.
+--  * Avisos de "sumiu" (vendedores e ilhas de evento) não disparam mais
+--    quando o mapa usa streaming: item descarregado no cliente != sumiu.
+--  * Pausa das automações agora é um contador (duas ações ao mesmo tempo não
+--    religam o farm no meio de uma viagem).
+--  * Textos informativos da UI só são recalculados quando a aba está visível.
+--  * Spawns/NPCs que não são Model/BasePart não causam mais erro silencioso.
+--
 -- NOVIDADES v13.0
 --  * UI própria com abas na ESQUERDA (o Rayfield foi removido)
 --  * Seleção de Sea (1/2/3) + viagem entre seas
@@ -12,7 +34,7 @@
 --    resultado do Fruit Sniper + botão de teste do Webhook
 --  * Loja (estilos de luta, haki), jogador (speed, pulo infinito...), etc.
 
-local VERSAO = "13.4"
+local VERSAO = "13.6"
 
 -- =========================================================================
 -- LOG / SERVIÇOS
@@ -191,7 +213,18 @@ if genv["Automata_Hub_Janitor_v12"] then pcall(function() genv["Automata_Hub_Jan
 genv[ID_UNICO_SCRIPT] = Janitor.new()
 local ScriptJanitor = genv[ID_UNICO_SCRIPT]
 
-local Estado = { rodando = true, modo = "ocioso", inicio = os.clock(), pausa = false }
+local Estado = { rodando = true, modo = "ocioso", inicio = os.clock(), pausa = false, pausas = 0 }
+
+-- Pausa por contador: várias ações podem pausar ao mesmo tempo, e o farm só
+-- volta quando TODAS terminarem (antes, a primeira a terminar religava tudo).
+local function pausar()
+    Estado.pausas = Estado.pausas + 1
+    Estado.pausa = true
+end
+local function retomar()
+    Estado.pausas = math.max(0, Estado.pausas - 1)
+    Estado.pausa = Estado.pausas > 0
+end
 
 -- =========================================================================
 -- CONFIGURAÇÃO
@@ -232,7 +265,7 @@ do
         IlhaSelecionada = nil, NpcSelecionado = nil,
         -- Loja / Progressão
         EstiloSelecionado = "Superhuman", AutoComprarEstilos = false, VoltarDepoisCompra = true,
-        UsarEstiloFarm = false, EstiloFarm = nil, VendedorNotifier = true,
+        UsarEstiloFarm = false, EstiloFarm = nil, VendedorNotifier = true, NpcBusca = "", NpcManual = "",
         -- Avisos / Eventos
         FullMoonNotifier = true, BossNotifier = false,
         MirageNotifier = true, KitsuneNotifier = true, PrehistoricNotifier = true,
@@ -318,9 +351,11 @@ local function spawnMaisProximo(conjunto)
     for _, s in ipairs(spawns:GetChildren()) do
         for nome in pairs(conjunto) do
             if string.find(s.Name, nome, 1, true) then
-                local cf = s:GetPivot()
-                local d = (cf.Position - root.Position).Magnitude
-                if d < menor then menor, melhor = d, cf end
+                local cf = pivotDe(s)
+                if cf then
+                    local d = (cf.Position - root.Position).Magnitude
+                    if d < menor then menor, melhor = d, cf end
+                end
             end
         end
     end
@@ -1616,36 +1651,258 @@ do
         end)
     end
 
-    -- NPCs: Workspace.NPCs + modelos com Humanoid soltos no Workspace.
-    -- Procura primeiro pelo nome EXATO e depois por "contém"; devolve o mais perto.
-    function F.acharNpc(palavras)
-        local root = meuRoot()
-        local candidatos = {}
-        local pasta = Workspace:FindFirstChild("NPCs")
-        if pasta then for _, c in ipairs(pasta:GetChildren()) do table.insert(candidatos, c) end end
-        for _, c in ipairs(Workspace:GetChildren()) do
-            if c:IsA("Model") and c:FindFirstChildOfClass("Humanoid") and not Players:GetPlayerFromCharacter(c) then
-                table.insert(candidatos, c)
+    -- ---- Busca de NPCs ------------------------------------------------------
+    -- Normaliza: minúsculas e sem espaços/símbolos ("Dark-Step Teacher" -> "darkstepteacher")
+    local function normNome(s)
+        s = string.lower(tostring(s or ""))
+        s = string.gsub(s, "[^%w]", "")
+        return s
+    end
+
+    -- Todos os pedaços da palavra-chave precisam aparecer no nome:
+    -- "blox fruit dealer" casa com "Blox Fruits Dealer"; "dark step" com "DarkStepTeacher"
+    local function casa(nomeNorm, palavra)
+        local algum = false
+        for pedaco in string.gmatch(palavra, "%S+") do
+            local p = normNome(pedaco)
+            if p ~= "" then
+                algum = true
+                if not string.find(nomeNorm, p, 1, true) then return false end
             end
         end
+        return algum
+    end
+
+    -- Versão com os pedaços já normalizados (usada na varredura grande)
+    local function tokensDe(palavra)
+        local l = {}
+        for pedaco in string.gmatch(palavra, "%S+") do
+            local p = normNome(pedaco)
+            if p ~= "" then table.insert(l, p) end
+        end
+        return l
+    end
+    local function casaTokens(nomeNorm, tokens)
+        if #tokens == 0 then return false end
+        for _, p in ipairs(tokens) do
+            if not string.find(nomeNorm, p, 1, true) then return false end
+        end
+        return true
+    end
+
+    -- nome do modelo E o DisplayName do Humanoid
+    local function nomesDe(c)
+        local l = { normNome(c.Name) }
+        local h = c:FindFirstChildOfClass("Humanoid")
+        if h and h.DisplayName ~= "" then table.insert(l, normNome(h.DisplayName)) end
+        return l
+    end
+
+    -- Índice de modelos que contêm um Humanoid: UMA varredura inicial e depois
+    -- mantido por eventos. (Antes, cada busca "profunda" refazia
+    -- Workspace:GetDescendants() a cada 15s, o que trava em mapas grandes.)
+    local indiceHum = {}      -- indiceHum[modelo] = true
+    local indiceMontado = false
+    local function registrarHumanoid(h)
+        local m = h.Parent
+        if m and m:IsA("Model") then indiceHum[m] = true end
+    end
+    local function montarIndice()
+        if indiceMontado then return end
+        indiceMontado = true
+        ScriptJanitor:Adicionar(Workspace.DescendantAdded:Connect(function(d)
+            if d:IsA("Humanoid") then registrarHumanoid(d) end
+        end))
+        ScriptJanitor:Adicionar(Workspace.DescendantRemoving:Connect(function(d)
+            if indiceHum[d] then indiceHum[d] = nil end
+        end))
+        for _, d in ipairs(Workspace:GetDescendants()) do
+            if d:IsA("Humanoid") then registrarHumanoid(d) end
+        end
+    end
+    task.defer(function() pcall(montarIndice) end)
+
+    -- Candidatos: Workspace.NPCs + modelos soltos com Humanoid + (profundo) QUALQUER
+    -- modelo com Humanoid em qualquer lugar do Workspace (via índice acima).
+    -- O 2º parâmetro (forcar) foi mantido só por compatibilidade e é ignorado.
+    local function candidatosNpc(profundo, forcar)
+        local lista, vistos = {}, {}
+        local function add(c)
+            if not vistos[c] then
+                vistos[c] = true
+                table.insert(lista, c)
+            end
+        end
+        local pasta = Workspace:FindFirstChild("NPCs")
+        if pasta then for _, c in ipairs(pasta:GetChildren()) do add(c) end end
+        for _, c in ipairs(Workspace:GetChildren()) do
+            if c:IsA("Model") and c:FindFirstChildOfClass("Humanoid") and not Players:GetPlayerFromCharacter(c) then
+                add(c)
+            end
+        end
+        if profundo then
+            pcall(montarIndice)
+            local enemies = Workspace:FindFirstChild("Enemies")
+            local chars = Workspace:FindFirstChild("Characters")
+            local boats = Workspace:FindFirstChild("Boats")
+            for m in pairs(indiceHum) do
+                if m.Parent and not vistos[m] and not Players:GetPlayerFromCharacter(m)
+                    and not (enemies and m:IsDescendantOf(enemies))
+                    and not (chars and m:IsDescendantOf(chars))
+                    and not (boats and m:IsDescendantOf(boats)) then
+                    add(m)
+                end
+            end
+        end
+        return lista
+    end
+
+    -- Procura o NPC já carregado no cliente. Devolve (npc, distância) ou nil.
+    function F.acharNpc(palavras, profundo, forcar)
+        if profundo == nil then profundo = true end
+        local root = meuRoot()
+        local cands = candidatosNpc(profundo, forcar)
         for _, exato in ipairs({ true, false }) do
             local melhor, menor = nil, math.huge
-            for _, c in ipairs(candidatos) do
+            for _, c in ipairs(cands) do
                 if not c:IsA("Tool") then
-                    local n = string.lower(c.Name)
+                    local nomes = nomesDe(c)
+                    local bate = false
                     for _, p in ipairs(palavras) do
-                        if (exato and n == p) or (not exato and string.find(n, p, 1, true)) then
-                            local cf = pivotDe(c)
-                            if cf then
-                                local d = root and (cf.Position - root.Position).Magnitude or 0
-                                if d < menor then menor, melhor = d, c end
-                            end
-                            break
+                        local pn = normNome(p)
+                        for _, n in ipairs(nomes) do
+                            if (exato and n == pn) or (not exato and casa(n, p)) then bate = true break end
+                        end
+                        if bate then break end
+                    end
+                    if bate then
+                        local cf = pivotDe(c)
+                        if cf then
+                            local d = root and (cf.Position - root.Position).Magnitude or 0
+                            if d < menor then menor, melhor = d, c end
                         end
                     end
                 end
             end
             if melhor then return melhor, menor end
+        end
+        return nil, nil
+    end
+
+    -- Nomes de NPCs "parecidos" com o que foi procurado (para você ver o nome real)
+    function F.nomesParecidos(palavras)
+        local tokens = {}
+        for _, p in ipairs(palavras) do
+            for pedaco in string.gmatch(p, "%S+") do
+                local t = normNome(pedaco)
+                if #t >= 3 then tokens[t] = true end
+            end
+        end
+        local achados, vistos = {}, {}
+        for _, c in ipairs(candidatosNpc(true)) do
+            for _, n in ipairs(nomesDe(c)) do
+                for t in pairs(tokens) do
+                    if string.find(n, t, 1, true) and not vistos[c.Name] then
+                        vistos[c.Name] = true
+                        table.insert(achados, c.Name)
+                    end
+                end
+            end
+            if #achados >= 12 then break end
+        end
+        return achados
+    end
+
+    local function logNaoAchado(palavras)
+        local pasta = Workspace:FindFirstChild("NPCs")
+        local parecidos = F.nomesParecidos(palavras)
+        registrarLog("NPC", string.format("'%s' não encontrado | StreamingEnabled=%s | Workspace.NPCs=%s | nomes parecidos: %s",
+            table.concat(palavras, " / "), tostring(Workspace.StreamingEnabled),
+            pasta and (tostring(#pasta:GetChildren()) .. " itens") or "inexistente",
+            #parecidos > 0 and table.concat(parecidos, ", ") or "nenhum"))
+    end
+
+    -- Procura QUALQUER Model/Folder/BasePart (não só os que têm Humanoid) cujo
+    -- nome contenha os termos, no Workspace e no ReplicatedStorage. Percorre em
+    -- lotes para não travar o jogo. Yield! Devolve (tabela termo -> instâncias, total examinado).
+    function F.buscarPorNome(termos, limitePorTermo)
+        local alvos = {}
+        for _, t in ipairs(termos) do
+            alvos[t] = { tokens = tokensDe(t), achados = {} }
+        end
+        local contador = 0
+        for _, raiz in ipairs({ Workspace, ReplicatedStorage }) do
+            for _, d in ipairs(raiz:GetDescendants()) do
+                contador = contador + 1
+                if contador % 3000 == 0 then task.wait() end
+                if d:IsA("Model") or d:IsA("Folder") or d:IsA("BasePart") then
+                    local n = normNome(d.Name)
+                    if n ~= "" then
+                        for _, t in ipairs(termos) do
+                            local a = alvos[t]
+                            if #a.achados < limitePorTermo and casaTokens(n, a.tokens) then
+                                table.insert(a.achados, d)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        local resultado = {}
+        for _, t in ipairs(termos) do resultado[t] = alvos[t].achados end
+        return resultado, contador
+    end
+
+    -- Se o mapa usa streaming, NPCs longe não existem no cliente: força o carregamento
+    local NpcPos = {}   -- posições já vistas nesta sessão
+    local function carregarAoRedor(pos, timeout)
+        pcall(function() LocalPlayer:RequestStreamAroundAsync(pos, timeout or 4) end)
+    end
+
+    -- Procura o NPC (pode demorar: faz varredura pelas ilhas se necessário). Yield!
+    function F.localizarNpc(palavras)
+        local chave = normNome(palavras[1] or "")
+        local npc, d = F.acharNpc(palavras, true)
+        if npc then
+            local cf = pivotDe(npc)
+            if cf then NpcPos[chave] = cf.Position end
+            return npc, d
+        end
+        if not Workspace.StreamingEnabled then return nil, nil end
+
+        local conhecido = NpcPos[chave]
+        if conhecido then
+            carregarAoRedor(conhecido, 4)
+            task.wait(0.3)
+            npc, d = F.acharNpc(palavras, true, true)
+            if npc then return npc, d end
+        end
+
+        notificar("NPC", "Procurando '" .. tostring(palavras[1]) .. "' pelo mapa (pode levar até 1 min)...")
+        local locs = locations()
+        if not locs then return nil, nil end
+        local root = meuRoot()
+        local pontos = {}
+        for _, c in ipairs(locs:GetChildren()) do
+            local cf = pivotDe(c)
+            if cf then table.insert(pontos, cf.Position) end
+        end
+        if root then
+            table.sort(pontos, function(a, b)
+                return (a - root.Position).Magnitude < (b - root.Position).Magnitude
+            end)
+        end
+        local t0 = os.clock()
+        for _, pos in ipairs(pontos) do
+            if os.clock() - t0 > 60 or not Estado.rodando then break end
+            carregarAoRedor(pos, 3)
+            task.wait(0.2)
+            npc, d = F.acharNpc(palavras, true, true)
+            if npc then
+                local cf = pivotDe(npc)
+                if cf then NpcPos[chave] = cf.Position end
+                return npc, d
+            end
         end
         return nil, nil
     end
@@ -1656,24 +1913,152 @@ do
         local root = meuRoot()
         if not root then return false, "sem personagem", false end
         local origem = root.CFrame
-        local npc = F.acharNpc(palavras)
-        local resultado = nil
-        Estado.pausa = true
+        local resultado, achou = nil, false
+        pausar()
         local ok, err = pcall(function()
+            local npc = F.localizarNpc(palavras)
+            achou = npc ~= nil
             if npc then
                 local cf = pivotDe(npc)
                 if cf and not viajar(cf + Vector3.new(0, 4, 0), 250) then
                     error("não consegui chegar até o NPC", 0)
                 end
+            else
+                logNaoAchado(palavras)
             end
             task.wait(0.5)
             resultado = acao()
             task.wait(0.3)
-            if npc and Cfg:Get("VoltarDepoisCompra") then viajar(origem, 250) end
+            if achou and Cfg:Get("VoltarDepoisCompra") then viajar(origem, 250) end
         end)
-        Estado.pausa = false
-        if not ok then return false, tostring(err), npc ~= nil end
-        return true, resultado, npc ~= nil
+        retomar()
+        if not ok then return false, tostring(err), achou end
+        return true, resultado, achou
+    end
+
+    -- Diagnóstico: relatório completo (F9 + área de transferência + arquivo)
+    function F.diagnosticoNpcs()
+        task.spawn(function()
+            local linhas = {}
+            local function out(s)
+                table.insert(linhas, s)
+                registrarLog("NPC", s)
+            end
+
+            out("=== Diagnóstico de NPCs - Automata Hub v" .. VERSAO .. " ===")
+            out("PlaceId=" .. tostring(game.PlaceId) .. " | StreamingEnabled=" .. tostring(Workspace.StreamingEnabled))
+            pcall(function()
+                out("StreamingMinRadius=" .. tostring(Workspace.StreamingMinRadius)
+                    .. " | StreamingTargetRadius=" .. tostring(Workspace.StreamingTargetRadius))
+            end)
+
+            local function listarPasta(titulo, pasta)
+                if not pasta then out(titulo .. ": NÃO existe") return end
+                local nomes = {}
+                for _, c in ipairs(pasta:GetChildren()) do
+                    table.insert(nomes, c.Name .. " [" .. c.ClassName .. "]")
+                end
+                table.sort(nomes)
+                out(string.format("%s: %d itens", titulo, #nomes))
+                local limite = math.min(#nomes, 300)
+                for i = 1, limite, 15 do
+                    out("   " .. table.concat(nomes, ", ", i, math.min(i + 14, limite)))
+                end
+            end
+            listarPasta("Workspace.NPCs", Workspace:FindFirstChild("NPCs"))
+            listarPasta("ReplicatedStorage.NPCs", ReplicatedStorage:FindFirstChild("NPCs"))
+
+            local modelos = candidatosNpc(true)
+            local caminhos = {}
+            for _, m in ipairs(modelos) do table.insert(caminhos, m:GetFullName()) end
+            table.sort(caminhos)
+            out("Modelos carregados agora (Workspace.NPCs + modelos com Humanoid, sem Enemies/Characters/Boats/jogadores): " .. #caminhos)
+            for i = 1, math.min(#caminhos, 200) do out("   " .. caminhos[i]) end
+            if #caminhos > 200 then out("   ... (+" .. (#caminhos - 200) .. " omitidos)") end
+
+            -- termos: o que você digitou em "Procurar NPC por nome" OU todas as
+            -- palavras-chave que o script usa hoje (estilos, vendedores, gacha)
+            local termos, vistosTermo = {}, {}
+            local function addTermo(t)
+                t = trim(t)
+                if t ~= "" and not vistosTermo[t] then
+                    vistosTermo[t] = true
+                    table.insert(termos, t)
+                end
+            end
+            local digitado = trim(Cfg:Get("NpcBusca"))
+            if digitado ~= "" then
+                addTermo(digitado)
+            else
+                for _, e in ipairs(ESTILOS_LISTA) do for _, p in ipairs(e.npc) do addTermo(p) end end
+                for _, v in ipairs(VENDEDORES) do for _, p in ipairs(v.npc) do addTermo(p) end end
+                addTermo("cousin")
+                addTermo("gacha")
+            end
+
+            out("Buscando por nome em Workspace e ReplicatedStorage (pode levar alguns segundos)...")
+            local ok, achados, total = pcall(F.buscarPorNome, termos, 15)
+            if not ok then
+                out("ERRO na busca por nome: " .. tostring(achados))
+            else
+                out("Instâncias examinadas: " .. tostring(total))
+                for _, t in ipairs(termos) do
+                    local l = achados[t] or {}
+                    if #l == 0 then
+                        out(string.format("termo '%s': nenhuma instância com esse nome", t))
+                    else
+                        out(string.format("termo '%s': %d resultado(s)", t, #l))
+                        for _, d in ipairs(l) do
+                            out("   [" .. d.ClassName .. "] " .. d:GetFullName())
+                        end
+                    end
+                end
+            end
+            out("=== fim do diagnóstico ===")
+
+            local texto = table.concat(linhas, "\n")
+            local copiado, salvo = false, false
+            if setclipboard then copiado = pcall(setclipboard, texto) end
+            if writefile then salvo = pcall(writefile, "automata_diagnostico.txt", texto) end
+            notificar("Diagnóstico de NPCs", string.format("Pronto (%d linhas). Área de transferência: %s | Arquivo automata_diagnostico.txt: %s | F9: sim.",
+                #linhas, copiado and "copiado" or "indisponível", salvo and "salvo" or "indisponível"))
+        end)
+    end
+
+    -- Procurar um NPC pelo nome digitado e ir até ele
+    function F.procurarNpcPorNome()
+        task.spawn(function()
+            local texto = trim(Cfg:Get("NpcBusca"))
+            if texto == "" then notificar("NPC", "Digite o nome (ou parte do nome) do NPC primeiro.") return end
+            pausar()
+            local ok, npc = pcall(F.localizarNpc, { texto })
+            local cf = ok and npc and pivotDe(npc)
+            local nomeDestino = npc and npc.Name or nil
+            if not cf then
+                -- plano B: qualquer Model/Folder/BasePart com esse nome (mostra o caminho real)
+                local ok2, achados = pcall(F.buscarPorNome, { texto }, 10)
+                if ok2 and type(achados) == "table" then
+                    local lista = achados[texto] or {}
+                    local escolhido = nil
+                    for _, d in ipairs(lista) do
+                        if d:IsA("Model") then escolhido = d break end
+                    end
+                    escolhido = escolhido or lista[1]
+                    if escolhido then
+                        cf = pivotDe(escolhido)
+                        nomeDestino = "[" .. escolhido.ClassName .. "] " .. escolhido:GetFullName()
+                    end
+                end
+            end
+            retomar()
+            if cf then
+                notificar("NPC", "Indo até " .. tostring(nomeDestino))
+                teleportar(cf + Vector3.new(0, 4, 0))
+            else
+                logNaoAchado({ texto })
+                notificar("NPC", "Não achei '" .. texto .. "'. Rode o Diagnóstico de NPCs: o relatório vai para o F9 e para a área de transferência.")
+            end
+        end)
     end
 
     -- Tudo que você possui: Tools (estilos/espadas) + inventário. Devolve (set, maestria)
@@ -1751,7 +2136,10 @@ do
         local e = estiloPorNome(nome)
         if not e then notificar("Estilos", "Escolha um estilo que falta primeiro.") return false end
         if F.possuidos()[e.nome] then notificar("Estilos", "Você já tem o " .. e.nome .. ".") return true end
-        local feito, r, achou = F.comNpc(e.npc, function() return obterCommF():InvokeServer(e.remote) end)
+        local palavras = e.npc
+        local manual = trim(Cfg:Get("NpcManual"))
+        if manual ~= "" then palavras = { manual } end   -- nome do NPC digitado por você
+        local feito, r, achou = F.comNpc(palavras, function() return obterCommF():InvokeServer(e.remote) end)
         task.wait(1.5)
         if F.possuidos()[e.nome] then
             F.avisar("Estilo comprado!", e.nome .. " foi liberado no seu personagem.", 5763719)
@@ -1836,18 +2224,30 @@ do
                 table.insert(l, v.nome .. ": não encontrado" .. (v.raro and " (não spawnou)" or ""))
             end
         end
+        if Workspace.StreamingEnabled then
+            table.insert(l, "(este mapa usa streaming: NPCs longe podem não estar carregados — use \"Ir até\" para procurar)")
+        end
         return table.concat(l, "\n")
     end
 
     function F.irParaVendedor(chave)
-        for _, v in ipairs(VENDEDORES) do
-            if v.chave == chave then
-                local npc = F.acharNpc(v.npc)
-                local cf = npc and pivotDe(npc)
-                if cf then teleportar(cf + Vector3.new(0, 4, 0)) else notificar("Vendedores", v.nome .. " não está spawnado agora.") end
-                return
+        task.spawn(function()
+            for _, v in ipairs(VENDEDORES) do
+                if v.chave == chave then
+                    pausar()
+                    local ok, npc = pcall(F.localizarNpc, v.npc)
+                    retomar()
+                    local cf = ok and npc and pivotDe(npc)
+                    if cf then
+                        teleportar(cf + Vector3.new(0, 4, 0))
+                    else
+                        logNaoAchado(v.npc)
+                        notificar("Vendedores", v.nome .. " não está spawnado (ou não foi encontrado). Veja o F9.")
+                    end
+                    return
+                end
             end
-        end
+        end)
     end
 
     task.spawn(function()
@@ -1861,10 +2261,16 @@ do
                             local existe = npc ~= nil
                             if existe and not presente[v.chave] then
                                 F.avisar(v.nome .. " spawnou!", string.format("%s está no mapa (a %.0f studs de você).", v.nome, dist or 0), 3066993)
+                                presente[v.chave] = true
                             elseif not existe and presente[v.chave] then
-                                F.avisar(v.nome .. " sumiu", v.nome .. " não está mais no mapa.", 8421504)
+                                -- Com streaming, "não está carregado no cliente" NÃO significa
+                                -- "sumiu do jogo" (acontece só de você se afastar). Só avisa
+                                -- "sumiu" quando o mapa não usa streaming.
+                                if not Workspace.StreamingEnabled then
+                                    F.avisar(v.nome .. " sumiu", v.nome .. " não está mais no mapa.", 8421504)
+                                    presente[v.chave] = false
+                                end
                             end
-                            presente[v.chave] = existe
                         end)
                         if not ok then registrarErro("Vendedor", err) end
                     end
@@ -1976,7 +2382,8 @@ end
 function F.irParaNpcSelecionado()
     local pasta, nome = Workspace:FindFirstChild("NPCs"), Cfg:Get("NpcSelecionado")
     local npc = pasta and nome and pasta:FindFirstChild(nome)
-    if npc then teleportar(npc:GetPivot() + Vector3.new(0, 4, 0)) else notificar("Teleport", "Escolha um NPC primeiro.") end
+    local cf = pivotDe(npc)
+    if cf then teleportar(cf + Vector3.new(0, 4, 0)) else notificar("Teleport", "Escolha um NPC primeiro.") end
 end
 
 function F.irParaFrutaMaisProxima()
@@ -2500,10 +2907,14 @@ task.spawn(function()
                     local existe = F.acharIlhaEvento(ev) ~= nil
                     if existe and not presente[ev.chave] then
                         F.avisar(ev.titulo .. " apareceu!", "A " .. ev.titulo .. " está ativa neste servidor.", 15277667)
+                        presente[ev.chave] = true
                     elseif not existe and presente[ev.chave] then
-                        F.avisar(ev.titulo .. " sumiu", "A " .. ev.titulo .. " não está mais neste servidor.", 8421504)
+                        -- com streaming, "não carregada no cliente" != "sumiu do servidor"
+                        if not Workspace.StreamingEnabled then
+                            F.avisar(ev.titulo .. " sumiu", "A " .. ev.titulo .. " não está mais neste servidor.", 8421504)
+                            presente[ev.chave] = false
+                        end
                     end
-                    presente[ev.chave] = existe
                 end)
                 if not ok then registrarErro("Evento", err) end
             else
@@ -2870,6 +3281,11 @@ local CONTROLES = {
     { aba = "Progressão", tipo = "botao", nome = "Ir até o Haki Color Dealer", acao = function() F.irParaVendedor("HakiColor") end },
     { aba = "Progressão", tipo = "botao", nome = "Ir até o Advanced Fruit Dealer", acao = function() F.irParaVendedor("AdvancedFruit") end },
     { aba = "Progressão", tipo = "toggle", nome = "Avisar quando um vendedor raro spawnar", chave = "VendedorNotifier" },
+    { aba = "Progressão", tipo = "secao", nome = "NPCs (busca e diagnóstico)" },
+    { aba = "Progressão", tipo = "botao", nome = "Diagnóstico de NPCs (F9 + área de transferência)", acao = F.diagnosticoNpcs },
+    { aba = "Progressão", tipo = "input", nome = "Procurar NPC por nome", chave = "NpcBusca", placeholder = "ex: dealer, scientist, teacher" },
+    { aba = "Progressão", tipo = "botao", nome = "Ir até o NPC pesquisado", acao = F.procurarNpcPorNome },
+    { aba = "Progressão", tipo = "input", nome = "NPC ensinador manual (usado ao comprar estilos)", chave = "NpcManual", placeholder = "deixe vazio para usar o automático" },
 
     -- LOJA
     { aba = "Loja", tipo = "secao", nome = "Haki / Habilidades" },
@@ -3190,6 +3606,9 @@ local function construirUI()
             b.BackgroundColor3 = (n == nome) and Tema.acento or Tema.item
             b.TextColor3 = (n == nome) and Color3.new(1, 1, 1) or Tema.sub
         end
+        -- os textos informativos só são calculados para a aba visível:
+        -- atualiza assim que a aba muda
+        task.defer(function() atualizarVisuais() end)
     end
 
     local function pagina(nome)
@@ -3272,8 +3691,12 @@ local function construirUI()
         local function visual()
             rot.Text = type(c.texto) == "function" and tostring(c.texto()) or tostring(c.texto)
         end
-        visual()
-        registrar(visual)
+        -- texto fixo: mostra já. Texto calculado: só quando a aba estiver visível
+        -- (alguns fazem buscas de NPC / consultas ao inventário).
+        if type(c.texto) ~= "function" then visual() else rot.Text = "..." end
+        registrar(function()
+            if p.Visible then visual() end
+        end)
     end
 
     local function criarToggle(p, c)
