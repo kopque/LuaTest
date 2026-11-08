@@ -1,11 +1,22 @@
 -- =========================================================================
---   AUTOMATA HUB v13.6 - BLOX FRUITS
+--   AUTOMATA HUB v13.7 - BLOX FRUITS
 -- =========================================================================
 -- AVISO: as partes específicas do jogo (remotes, nomes de pastas, bosses,
 -- ID da lua, nomes das ilhas de evento) vêm de scripts da comunidade e NÃO
 -- foram testadas no jogo. Tudo roda dentro de pcall: se algo falhar, o
 -- console (F9) mostra o motivo e o resto do script continua funcionando.
 -- Ajuste as CONSTANTES abaixo se o jogo mudar.
+--
+-- NOVIDADES v13.7 (nada foi testado no jogo)
+--  * Auto Rejoin: antes reagia a QUALQUER ErrorPrompt, inclusive ao popup de
+--    falha de teleporte (erro 773), e tentava outro teleporte em seguida.
+--    Agora lê o código do erro (GuiService:GetErrorCode) e NÃO reentra quando
+--    é falha de teleporte (768-775) ou quando um teleporte falhou há poucos
+--    segundos. Limite de 3 tentativas por 10 min. Todo ErrorPrompt é logado
+--    no F9 com código e texto (278 = kick por ociosidade).
+--  * Anti-AFK: duas camadas (evento Idled + toque a cada 50s), erros deixam
+--    de ser engolidos, e o HUD de debug mostra quantas vezes cada camada rodou.
+--  * Rejoin avisa quando nenhum método de reentrada funcionou.
 --
 -- NOVIDADES v13.6 (correções feitas lendo o código; nada foi testado no jogo)
 --  * A busca de NPCs deixou de varrer o Workspace inteiro a cada 15s (causava
@@ -34,7 +45,7 @@
 --    resultado do Fruit Sniper + botão de teste do Webhook
 --  * Loja (estilos de luta, haki), jogador (speed, pulo infinito...), etc.
 
-local VERSAO = "13.6"
+local VERSAO = "13.7"
 
 -- =========================================================================
 -- LOG / SERVIÇOS
@@ -74,6 +85,7 @@ local UserInputService = Services.UserInputService
 local CoreGui = Services.CoreGui
 local HttpService = Services.HttpService
 local TeleportService = Services.TeleportService
+local GuiService = Services.GuiService
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -1449,7 +1461,17 @@ end
 -- Erro 773 = "teleporte para local restrito": o servidor escolhido (ou o modo
 -- de teleporte) foi recusado. Em vez de tentar uma vez só, agora o script
 -- escuta TeleportInitFailed, marca o servidor como ruim e tenta outro.
-local Hop = { ocupado = false, falhos = {} }
+local Hop = { ocupado = false, falhos = {}, ultimaFalha = -999 }
+
+-- Listener permanente: registra TODA falha de teleporte (o log mostra o motivo
+-- real) e guarda o instante, usado pelo Auto Rejoin para não reagir ao popup
+-- de falha de teleporte.
+ScriptJanitor:Adicionar(TeleportService.TeleportInitFailed:Connect(function(pl, resultado, msg)
+    if pl == LocalPlayer then
+        Hop.ultimaFalha = os.clock()
+        registrarLog("Teleport", "TeleportInitFailed: " .. tostring(resultado) .. " - " .. tostring(msg))
+    end
+end))
 
 local function requisicaoHttp(url)
     local ok, res = pcall(function() return game:HttpGet(url) end)
@@ -1536,12 +1558,16 @@ function F.reentrar()
             function() TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer) end, -- mesmo servidor
             function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end,                           -- qualquer servidor
         }
+        local deuCerto = false
         for _, fn in ipairs(estrategias) do
             local feito, motivo = teleportarComRetorno(fn)
-            if feito then break end
+            if feito then deuCerto = true break end
             registrarLog("Rejoin", "Falhou: " .. tostring(motivo))
             notificar("Rejoin", "Falhou (" .. tostring(motivo) .. "). Tentando outro método...")
             task.wait(3)
+        end
+        if not deuCerto then
+            notificar("Rejoin", "Nenhum método de reentrada funcionou. Veja o F9 para os motivos.")
         end
         Hop.ocupado = false
     end)
@@ -3062,14 +3088,67 @@ end)
 -- =========================================================================
 -- ANTI-AFK E REJOIN AUTOMÁTICO
 -- =========================================================================
+local AntiAfk = { idled = 0, ultimoIdled = nil, backup = 0, ultimoBackup = nil }
+
+local function cutucarAfk()
+    if not VirtualUser then error("VirtualUser indisponível neste executor", 0) end
+    VirtualUser:CaptureController()
+    VirtualUser:ClickButton2(Vector2.new(0, 0))
+end
+
+if not VirtualUser then
+    registrarLog("AntiAFK", "VirtualUser indisponível: o Anti-AFK não vai funcionar neste executor")
+end
+
+-- Camada 1: reage ao evento Idled do jogador
 ScriptJanitor:Adicionar(LocalPlayer.Idled:Connect(function()
-    if Cfg:Get("AntiAFK") and VirtualUser then
-        pcall(function()
-            VirtualUser:CaptureController()
-            VirtualUser:ClickButton2(Vector2.new(0, 0))
-        end)
+    AntiAfk.idled = AntiAfk.idled + 1
+    AntiAfk.ultimoIdled = os.clock()
+    registrarLog("AntiAFK", "Evento Idled recebido (#" .. tostring(AntiAfk.idled) .. ")")
+    if Cfg:Get("AntiAFK") then
+        local ok, err = pcall(cutucarAfk)
+        if not ok then registrarErro("AntiAFK", err) end
     end
 end))
+
+-- Camada 2: não depende do evento Idled; repete o mesmo toque a cada 50s.
+task.spawn(function()
+    while Estado.rodando do
+        task.wait(50)
+        if Cfg:Get("AntiAFK") then
+            local ok, err = pcall(cutucarAfk)
+            if ok then
+                AntiAfk.backup = AntiAfk.backup + 1
+                AntiAfk.ultimoBackup = os.clock()
+            else
+                registrarErro("AntiAFK", err)
+            end
+        end
+    end
+end)
+
+-- Texto de todos os TextLabel do prompt (para o log: mostra a mensagem real)
+local function textoDoPrompt(prompt)
+    local partes = {}
+    pcall(function()
+        for _, d in ipairs(prompt:GetDescendants()) do
+            if d:IsA("TextLabel") and d.Text ~= "" then table.insert(partes, d.Text) end
+        end
+    end)
+    return table.concat(partes, " | ")
+end
+
+-- Código do erro mostrado pelo Roblox (Enum.ConnectionError). Devolve (valor numérico, nome)
+local function codigoDeErro()
+    if not GuiService then return nil, nil end
+    local ok, cod = pcall(function() return GuiService:GetErrorCode() end)
+    if not ok or cod == nil then return nil, nil end
+    local valor = nil
+    pcall(function() valor = cod.Value end)
+    return valor, tostring(cod)
+end
+
+local RejoinAuto = { tentativas = {} }   -- os.clock() de cada tentativa automática
 
 task.spawn(function()
     local ok = pcall(function()
@@ -3077,10 +3156,35 @@ task.spawn(function()
         local overlay = gui and gui:WaitForChild("promptOverlay", 10)
         if not overlay then return end
         ScriptJanitor:Adicionar(overlay.ChildAdded:Connect(function(c)
-            if c.Name == "ErrorPrompt" and Cfg:Get("AutoRejoin") then
-                task.wait(2)
-                F.reentrar() -- já ignora se houver teleporte em andamento
+            if c.Name ~= "ErrorPrompt" then return end
+            task.wait(1)   -- dá tempo para o texto e o código de erro ficarem prontos
+            local valor, nomeCod = codigoDeErro()
+            registrarLog("Rejoin", string.format("ErrorPrompt: código=%s (%s) | texto: %s",
+                tostring(valor), tostring(nomeCod), textoDoPrompt(c)))
+            if not Cfg:Get("AutoRejoin") then return end
+
+            -- Falha de teleporte (768-775) ou teleporte recusado há poucos segundos:
+            -- você continua no jogo; "reentrar" repetiria o teleporte que acabou de falhar.
+            local eTeleporte = (valor ~= nil and valor >= 768 and valor <= 775)
+                or (os.clock() - Hop.ultimaFalha < 8)
+            if eTeleporte then
+                registrarLog("Rejoin", "Prompt de falha de teleporte: Auto Rejoin NÃO acionado.")
+                return
             end
+
+            -- no máximo 3 tentativas automáticas em 10 minutos
+            local agora, recentes = os.clock(), {}
+            for _, t in ipairs(RejoinAuto.tentativas) do
+                if agora - t < 600 then table.insert(recentes, t) end
+            end
+            RejoinAuto.tentativas = recentes
+            if #recentes >= 3 then
+                registrarLog("Rejoin", "Limite de 3 tentativas em 10 min atingido: não vou tentar de novo.")
+                notificar("Auto Rejoin", "3 tentativas em 10 min sem sucesso: parei de tentar. Veja o F9.")
+                return
+            end
+            table.insert(RejoinAuto.tentativas, agora)
+            F.reentrar() -- já ignora se houver teleporte em andamento
         end))
     end)
     if not ok then registrarLog("Rejoin", "Não foi possível monitorar quedas de conexão") end
@@ -3356,7 +3460,7 @@ local function criarDebugHud()
     ScriptJanitor:Adicionar(gui, "Destroy")
 
     local label = Instance.new("TextLabel")
-    label.Size = UDim2.new(0, 210, 0, 90)
+    label.Size = UDim2.new(0, 230, 0, 106)
     label.Position = UDim2.new(1, -220, 0, 10)
     label.BackgroundColor3 = Color3.fromRGB(15, 15, 22)
     label.BackgroundTransparency = 0.25
@@ -3378,9 +3482,9 @@ local function criarDebugHud()
                     local d = LocalPlayer.Data
                     lv, beli, frag = d.Level.Value, d.Beli.Value, d.Fragments.Value
                 end)
-                label.Text = string.format(" Sessão: %s\n Modo: %s\n Sea: %d (sel. %d)\n Level: %s\n Beli: %s | Frag: %s",
+                label.Text = string.format(" Sessão: %s\n Modo: %s\n Sea: %d (sel. %d)\n Level: %s\n Beli: %s | Frag: %s\n AntiAFK: Idled=%d | backup=%d",
                     formatarTempo(os.clock() - Estado.inicio), Estado.modo, seaAtual(), seaEfetivo(),
-                    tostring(lv), tostring(beli), tostring(frag))
+                    tostring(lv), tostring(beli), tostring(frag), AntiAfk.idled, AntiAfk.backup)
             end
             task.wait(1)
         end
