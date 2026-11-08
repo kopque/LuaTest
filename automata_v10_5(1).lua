@@ -1,68 +1,7 @@
 -- =========================================================================
---   AUTOMATA HUB v14.0 - BLOX FRUITS
+--   AUTOMATA HUB v14.3 - BLOX FRUITS
 -- =========================================================================
---
--- NOVIDADES v14.0 (nada foi testado no jogo)
---  * Velocidade do tween configurável (aba Main): Teleporte, Farm e Coleta.
---  * Intervalo entre golpes configurável (normal e Fast Attack), em ms.
---  * Debug Screen mostra Golpes/s ENVIADOS e Dano/s OBSERVADO no alvo, para
---    você medir se o Fast Attack muda algo de verdade.
---  * Botão "Diagnóstico de ataque": mostra se os remotes de ataque existem.
---
--- NOVIDADES v13.9 (nada foi testado no jogo)
---  * Rejoin manual, Auto Rejoin e Server Hop falharam com o mesmo erro
---    (Unauthorized / 773). O script não contorna isso; o que mudou é que ele
---    para de insistir: o Server Hop desiste após 2 recusas "Unauthorized"
---    seguidas e o Chest Hop desliga a troca automática de servidor após 2
---    tentativas sem efeito (antes repetia para sempre a cada 15s).
---
--- NOVIDADES v13.8 (nada foi testado no jogo)
---  * Toda desconexão / falha de teleporte agora é AVISADA (tela + Discord, se
---    o webhook estiver ativo) com o código e o texto do erro. Se todos os
---    métodos de reentrada falharem, o aviso traz o motivo de cada um.
---  * IMPORTANTE: o Rejoin usa TeleportService iniciado pelo cliente. Quando o
---    Roblox responde "Unauthorized" a esse tipo de teleporte, o script NÃO
---    consegue reentrar sozinho (ver explicação na conversa).
---
--- NOVIDADES v13.7 (nada foi testado no jogo)
---  * Auto Rejoin: antes reagia a QUALQUER ErrorPrompt, inclusive ao popup de
---    falha de teleporte (erro 773), e tentava outro teleporte em seguida.
---    Agora lê o código do erro (GuiService:GetErrorCode) e NÃO reentra quando
---    é falha de teleporte (768-775) ou quando um teleporte falhou há poucos
---    segundos. Limite de 3 tentativas por 10 min. Todo ErrorPrompt é logado
---    no F9 com código e texto (278 = kick por ociosidade).
---  * Anti-AFK: duas camadas (evento Idled + toque a cada 50s), erros deixam
---    de ser engolidos, e o HUD de debug mostra quantas vezes cada camada rodou.
---  * Rejoin avisa quando nenhum método de reentrada funcionou.
---
--- NOVIDADES v13.6 (correções feitas lendo o código; nada foi testado no jogo)
---  * A busca de NPCs deixou de varrer o Workspace inteiro a cada 15s (causava
---    travadas): agora há um índice de modelos com Humanoid, montado uma vez e
---    mantido por eventos (DescendantAdded / DescendantRemoving).
---  * Diagnóstico de NPCs: relatório completo copiado para a área de
---    transferência (e gravado em automata_diagnostico.txt, se o executor
---    permitir), com busca por nome em TODAS as instâncias do Workspace e do
---    ReplicatedStorage, mostrando classe e caminho completo.
---  * "Procurar NPC por nome" também tenta qualquer instância com aquele nome.
---  * Avisos de "sumiu" (vendedores e ilhas de evento) não disparam mais
---    quando o mapa usa streaming: item descarregado no cliente != sumiu.
---  * Pausa das automações agora é um contador (duas ações ao mesmo tempo não
---    religam o farm no meio de uma viagem).
---  * Textos informativos da UI só são recalculados quando a aba está visível.
---  * Spawns/NPCs que não são Model/BasePart não causam mais erro silencioso.
---
--- NOVIDADES v13.0
---  * UI própria com abas na ESQUERDA (o Rayfield foi removido)
---  * Seleção de Sea (1/2/3) + viagem entre seas
---  * Seleção de missões (lista por sea) + Auto Missão selecionada
---  * Bosses separados por sea
---  * ESP completo: frutas (com nome), ilhas, eventos, players, bosses,
---    baús, flores, NPCs, barcos, sea beasts
---  * Avisos: Mirage, Kitsune, Pré-História, Lua Cheia, boss, fruta,
---    resultado do Fruit Sniper + botão de teste do Webhook
---  * Loja (estilos de luta, haki), jogador (speed, pulo infinito...), etc.
-
-local VERSAO = "14.0"
+local VERSAO = "14.3"
 
 -- =========================================================================
 -- LOG / SERVIÇOS
@@ -159,6 +98,24 @@ local EVENTOS_ILHA = {
 }
 -- Itens de evento que o ESP tenta achar DENTRO das ilhas de evento (melhor esforço)
 local ITENS_EVENTO = { { "gear", "Blue Gear" }, { "ember", "Azure Ember" }, { "egg", "Dragon Egg" } }
+
+-- Presets de eventos temporários (palavras-chave separadas por vírgula; o espaço e
+-- os símbolos são ignorados: "jack o lantern" casa com "Jack O' Lantern").
+-- ATENÇÃO: estas palavras vêm de guias do evento Halloween 2026 (Candy Corn,
+-- Harvest Moon, Hellrider, Unbound Werewolf, Great Pumpkin, Zioles, Witch). Os
+-- nomes INTERNOS dos objetos no jogo não foram verificados: use o "Escanear evento".
+local PRESET_HALLOWEEN = "Halloween 2026 (nomes dos guias)"
+local PRESETS_EVENTO = {
+    [PRESET_HALLOWEEN] = {
+        mobs = "jack o lantern, werewolf, hellrider, hell rider, great pumpkin, pumpkin snowman, pumpkin head",
+        coletaveis = "pumpkin",
+        portas = "door",
+        npcs = "zioles, witch",
+        quebrar = "pumpkin, jack o lantern",   -- segundo os guias, abóboras são quebradas atacando
+        excluir = "gray, grey",                -- variante cinza é descrita como perigosa (spawna inimigos)
+    },
+}
+local OPCOES_PRESET_EVENTO = { PRESET_HALLOWEEN, "Personalizado" }
 
 -- Estilos de luta (remotes da loja)
 local ESTILOS = {
@@ -273,6 +230,7 @@ do
         AutoMastery = false, AutoMasteryFruit = false, MasteryWeapon = "Sword", MasteryHealth = 20,
         -- Sea / Missões
         SeaSelecionado = SEA_AUTO, QuestSelecionada = nil, AutoQuestSel = false,
+        QuestTravar = true,
         -- Bosses
         AutoBossesAll = false, AutoBossSel = false, BossSelecionado = nil, AutoElite = false,
         -- Sea events
@@ -301,6 +259,19 @@ do
         FullMoonNotifier = true, BossNotifier = false,
         MirageNotifier = true, KitsuneNotifier = true, PrehistoricNotifier = true,
         ChestHop = false, ChestHopServer = false,
+        -- Eventos temporários
+        EventoPreset = PRESET_HALLOWEEN,
+        EventoMobs = PRESETS_EVENTO[PRESET_HALLOWEEN].mobs,
+        EventoColetaveis = PRESETS_EVENTO[PRESET_HALLOWEEN].coletaveis,
+        EventoPortas = PRESETS_EVENTO[PRESET_HALLOWEEN].portas,
+        EventoNpcs = PRESETS_EVENTO[PRESET_HALLOWEEN].npcs,
+        EventoNpcSel = nil,
+        EventoFarmMobs = false, EventoColetar = false, EventoPortasOn = false,
+        EventoQuebrarOn = false,
+        EventoQuebrar = PRESETS_EVENTO[PRESET_HALLOWEEN].quebrar,
+        EventoQuebrarExcluir = PRESETS_EVENTO[PRESET_HALLOWEEN].excluir,
+        EventoSoHarvest = true, EventoToque = false, EventoRaio = 1500,
+        EventoAvisoHarvest = false, EventoMonitor = false,
         -- Jogador
         WalkSpeedOn = false, WalkSpeed = 60, InfJump = false, InfEnergy = false,
         FullBright = false, WalkWater = false, FpsBoost = false, NoClipManual = false,
@@ -374,23 +345,43 @@ local function pivotDe(inst)
     return nil
 end
 
--- CFrame do spawn mais próximo cujo nome contém algum nome do conjunto
+-- CFrame do spawn mais próximo cujo nome contém algum nome do conjunto.
+-- Se o conjunto tem UM só nome (caso das missões), tenta primeiro o nome EXATO:
+-- "Bandit" não deve levar você ao spawn de "Desert Bandit".
 local function spawnMaisProximo(conjunto)
     local spawns, root = spawnsPasta(), meuRoot()
     if not spawns or not root then return nil end
-    local melhor, menor = nil, math.huge
-    for _, s in ipairs(spawns:GetChildren()) do
-        for nome in pairs(conjunto) do
-            if string.find(s.Name, nome, 1, true) then
-                local cf = pivotDe(s)
-                if cf then
-                    local d = (cf.Position - root.Position).Magnitude
-                    if d < menor then menor, melhor = d, cf end
+
+    local total = 0
+    for _ in pairs(conjunto) do total = total + 1 end
+
+    local function procurar(exato)
+        local melhor, menor = nil, math.huge
+        for _, s in ipairs(spawns:GetChildren()) do
+            for nome in pairs(conjunto) do
+                local casou
+                if exato then
+                    casou = (s.Name == nome)
+                else
+                    casou = string.find(s.Name, nome, 1, true) ~= nil
+                end
+                if casou then
+                    local cf = pivotDe(s)
+                    if cf then
+                        local d = (cf.Position - root.Position).Magnitude
+                        if d < menor then menor, melhor = d, cf end
+                    end
                 end
             end
         end
+        return melhor
     end
-    return melhor
+
+    if total == 1 then
+        local exato = procurar(true)
+        if exato then return exato end
+    end
+    return procurar(false)
 end
 
 local function existeSpawn(nome)
@@ -601,6 +592,23 @@ function CombatManager:Atacar(char, hum, backpack, tooltip, alvo)
     pcall(function() ferramenta:Activate() end)
 end
 
+-- Só equipa a arma/estilo e clica (Tool:Activate), no mesmo ritmo do ataque normal.
+-- Usado para quebrar objetos que não são mobs (ex.: abóboras do evento).
+function CombatManager:Clicar(char, hum, backpack, tooltip)
+    local ferramenta = escolherFerramenta(char, backpack, tooltip)
+    if ferramenta and ferramenta.Parent ~= char then
+        hum:EquipTool(ferramenta)
+        task.wait(0.05)
+    end
+    if not (ferramenta and ferramenta.Parent == char) then return false end
+    local ms = Cfg:Get("FastAttack") and (tonumber(Cfg:Get("IntervaloFastMs")) or 30)
+        or (tonumber(Cfg:Get("IntervaloNormalMs")) or 120)
+    if os.clock() - AtaqueNet.ultimo < math.max(ms, 0) / 1000 then return true end
+    AtaqueNet.ultimo = os.clock()
+    pcall(function() ferramenta:Activate() end)
+    return true
+end
+
 function CombatManager:UsarHabilidades()
     if not VirtualInputManager then return end
     for _, tecla in ipairs(TECLAS_SKILL) do
@@ -800,9 +808,15 @@ end
 -- =========================================================================
 -- MISSÕES
 -- =========================================================================
-local function questAtiva()
+-- true / false = estado lido da GUI de missão; nil = não foi possível ler
+local function estadoQuestGui()
     local ok, v = pcall(function() return LocalPlayer.PlayerGui.Main.Quest.Visible end)
-    return ok and v == true
+    if ok and type(v) == "boolean" then return v end
+    return nil
+end
+
+local function questAtiva()
+    return estadoQuestGui() == true
 end
 
 local function iniciarQuest(nome, idx, abandonarAntes)
@@ -813,19 +827,18 @@ local function iniciarQuest(nome, idx, abandonarAntes)
     if not ok then registrarErro("Quest", err) end
 end
 
--- Quest automática do Auto Farm Level (escolhe pela quantidade de level)
-local Quest = { nome = nil, indice = nil, mob = nil, ultimo = 0 }
-
-function Quest:Atualizar()
+-- Escolhe a missão pelo level (mesma regra de antes) e devolve também a quantidade
+-- de alvos exigida: nome, índice, mob, quantidade
+local function escolherQuestPorLevel()
     local data = LocalPlayer:FindFirstChild("Data")
     local lv = data and data:FindFirstChild("Level")
     local mod = ReplicatedStorage:FindFirstChild("Quests")
-    if not lv or not mod then return end
+    if not lv or not mod then return nil end
     local okReq, tabela = pcall(require, mod)
-    if not okReq or type(tabela) ~= "table" then return end
+    if not okReq or type(tabela) ~= "table" then return nil end
 
     local function melhorQuest(exigirSpawn)
-        local nomeQ, idxQ, mobQ, reqQ = nil, nil, nil, -1
+        local nomeQ, idxQ, mobQ, qtdQ, reqQ = nil, nil, nil, nil, -1
         for nome, lista in pairs(tabela) do
             if type(lista) == "table" then
                 for idx, q in pairs(lista) do
@@ -835,52 +848,112 @@ function Quest:Atualizar()
                         -- tarefas com 1 alvo costumam ser bosses: ignora
                         if mob and type(qtd) == "number" and qtd > 1 and not ALL_BOSS_SET[norm(mob)]
                             and (not exigirSpawn or existeSpawn(mob)) then
-                            nomeQ, idxQ, mobQ, reqQ = nome, idx, mob, q.LevelReq
+                            nomeQ, idxQ, mobQ, qtdQ, reqQ = nome, idx, mob, qtd, q.LevelReq
                         end
                     end
                 end
             end
         end
-        return nomeQ, idxQ, mobQ
+        return nomeQ, idxQ, mobQ, qtdQ
     end
 
-    local n, i, m = melhorQuest(true)
-    if not n then n, i, m = melhorQuest(false) end
-    self.nome, self.indice, self.mob = n, i, m
+    local n, i, m, c = melhorQuest(true)
+    if not n then n, i, m, c = melhorQuest(false) end
+    return n, i, m, c
 end
 
-function Quest:Garantir()
-    if os.clock() - self.ultimo < 5 then return end
-    self.ultimo = os.clock()
-    local antes = self.nome
-    self:Atualizar()
-    if not self.nome then return end
-    local ativa = questAtiva()
-    if self.nome ~= antes or not ativa then
-        iniciarQuest(self.nome, self.indice, antes ~= nil and self.nome ~= antes)
+-- Gerenciador de missão. Regras:
+--  * a missão é identificada por NOME + ÍNDICE (antes só pelo nome);
+--  * com "travar" ligado, a missão atual NÃO é trocada por subir de level: só depois de concluída;
+--  * "concluída" = a GUI da missão estava visível e deixou de estar; se a GUI não puder ser
+--    lida, vale a contagem de mortes do alvo (>= quantidade exigida);
+--  * o StartQuest só é reenviado se a missão nunca apareceu como ativa em 10 s.
+local function novaGerenciadoraQuest(rotulo, escolher, travar)
+    local q = { nome = nil, indice = nil, mob = nil, qtd = nil, chave = nil,
+                ultimo = 0, ultimoStart = 0, viuAtiva = false, mortes = 0 }
+
+    local function chaveDe(n, i) return tostring(n) .. "#" .. tostring(i) end
+
+    function q:Liberar(motivo)
+        registrarLog("Quest", string.format("[%s] liberando a missão %s (%s)", rotulo, tostring(self.chave), motivo))
+        self.nome, self.indice, self.mob, self.qtd, self.chave = nil, nil, nil, nil, nil
+        self.viuAtiva, self.mortes = false, 0
     end
+
+    function q:Matou(alvo)
+        if self.chave and self.mob and alvo and alvo.Name == self.mob then
+            self.mortes = self.mortes + 1
+            registrarLog("Quest", string.format("[%s] %s morto (%d/%s)",
+                rotulo, tostring(self.mob), self.mortes, tostring(self.qtd or "?")))
+        end
+    end
+
+    function q:Garantir()
+        local agora = os.clock()
+        if agora - self.ultimo < 2 then return end
+        self.ultimo = agora
+        local estado = estadoQuestGui()
+        local abandonarAntes = false
+
+        if self.chave then
+            if estado == true then self.viuAtiva = true end
+
+            local terminou = false
+            if estado == false and self.viuAtiva then
+                terminou = true
+            elseif estado == nil and self.qtd and self.mortes >= self.qtd then
+                terminou = true
+            end
+
+            if terminou then
+                self:Liberar("concluída")
+            elseif not travar() then
+                local n, i = escolher()
+                if n and chaveDe(n, i) ~= self.chave then
+                    self:Liberar("a escolha mudou")
+                    abandonarAntes = (estado == true)
+                end
+            end
+
+            if self.chave then
+                -- continua na mesma missão; só reenvia o StartQuest se ele não "pegou"
+                if estado == false and not self.viuAtiva and agora - self.ultimoStart > 10 then
+                    self.ultimoStart = agora
+                    registrarLog("Quest", string.format("[%s] a missão %s não apareceu como ativa em 10s: reenviando StartQuest",
+                        rotulo, self.chave))
+                    iniciarQuest(self.nome, self.indice, false)
+                end
+                return
+            end
+        end
+
+        local n, i, m, qtd = escolher()
+        if not n then return end
+        self.nome, self.indice, self.mob, self.qtd = n, i, m, qtd
+        self.chave = chaveDe(n, i)
+        self.viuAtiva, self.mortes, self.ultimoStart = false, 0, agora
+        registrarLog("Quest", string.format("[%s] iniciando a missão %s (alvo: %s x%s)",
+            rotulo, self.chave, tostring(m), tostring(qtd or "?")))
+        iniciarQuest(n, i, abandonarAntes)
+    end
+
+    return q
 end
 
--- Quest escolhida pelo usuário na aba "Missões"
-local QuestSel = { chave = nil, ultimo = 0 }
+-- Auto Farm Level: missão escolhida pelo level, travada até concluir (opção "QuestTravar")
+local Quest = novaGerenciadoraQuest("Level", escolherQuestPorLevel,
+    function() return Cfg:Get("QuestTravar") ~= false end)
 
+-- Missão escolhida pelo usuário na aba "Missões": se ele trocar a escolha, troca na hora
 local function dadosQuestSel()
     return QuestDB:Dados(Cfg:Get("QuestSelecionada"))
 end
 
-function QuestSel:Garantir()
-    if os.clock() - self.ultimo < 5 then return end
-    self.ultimo = os.clock()
+local QuestSel = novaGerenciadoraQuest("Selecionada", function()
     local d = dadosQuestSel()
-    if not d then return end
-    local chave = tostring(d.nome) .. "/" .. tostring(d.idx)
-    if chave ~= self.chave then
-        iniciarQuest(d.nome, d.idx, true)
-        self.chave = chave
-    elseif not questAtiva() then
-        iniciarQuest(d.nome, d.idx, false)
-    end
-end
+    if d then return d.nome, d.idx, d.mob, d.qtd end
+    return nil
+end, function() return false end)
 
 function F.iniciarQuestSelecionadaAgora()
     task.spawn(function()
@@ -894,6 +967,44 @@ end
 -- =========================================================================
 -- DESPACHANTE DE COMBATE (prioridade: topo da lista primeiro)
 -- =========================================================================
+-- ---- Palavras-chave de eventos --------------------------------------------
+local function normKw(s)
+    return (string.gsub(string.lower(tostring(s or "")), "[^%w]", ""))
+end
+
+local kwCache = {}
+local function kwDe(chave)
+    local raw = tostring(Cfg:Get(chave) or "")
+    local c = kwCache[chave]
+    if c and c.raw == raw then return c.lista end
+    local lista = {}
+    for pedaco in string.gmatch(raw, "[^,;\n]+") do
+        local k = normKw(pedaco)
+        if k ~= "" then table.insert(lista, k) end
+    end
+    kwCache[chave] = { raw = raw, lista = lista }
+    return lista
+end
+
+-- devolve a palavra da lista contida no nome, ou nil
+local function casaKw(nome, lista)
+    local n = normKw(nome)
+    for _, k in ipairs(lista) do
+        if string.find(n, k, 1, true) then return k end
+    end
+    return nil
+end
+
+-- Relógio do servidor (UTC). Harvest Moon = primeiros 10 min de cada hora (segundo os guias)
+function F.agoraUtc()
+    local ok, t = pcall(function() return Workspace:GetServerTimeNow() end)
+    if ok and type(t) == "number" then return t end
+    return os.time()
+end
+function F.harvestAtiva()
+    return F.agoraUtc() % 3600 < 600
+end
+
 local function nomeEm(conjunto) return function(ent) return conjunto[ent.Name] == true end end
 local function qualquer() return true end
 local function soEnemies() return listaPastas(pastaEnemies()) end
@@ -916,6 +1027,8 @@ local MODOS = {
       filtro = function(e) return norm(e.Name) == norm(Cfg:Get("BossSelecionado")) end },
     { nome = "Elite", chaves = { "AutoElite" }, raio = 5000, pastas = soEnemies,
       filtro = function(e) return ELITE_SET[norm(e.Name)] == true end },
+    { nome = "Evento (mobs)", chaves = { "EventoFarmMobs" }, raio = 5000, pastas = soEnemies,
+      filtro = function(e) return casaKw(e.Name, kwDe("EventoMobs")) ~= nil end },
     { nome = "Sea Event", chaves = { "AutoSeaEvent" }, raio = 5000,
       pastas = function() return listaPastas(Workspace:FindFirstChild("SeaBeasts"), pastaEnemies()) end,
       filtro = function(e) return (e.Parent and e.Parent.Name == "SeaBeasts") or SEA_INIMIGOS[e.Name] == true end },
@@ -927,6 +1040,7 @@ local MODOS = {
       fallback = function() return spawnMaisProximo(BONES_MOBS) end },
     { nome = "Missão selecionada", chaves = { "AutoQuestSel" }, raio = 3000, pastas = soEnemies,
       preparar = function() QuestSel:Garantir() end,
+      aoMatar = function(alvo) QuestSel:Matou(alvo) end,
       filtro = function(e) local d = dadosQuestSel() return d ~= nil and e.Name == d.mob end,
       fallback = function()
           local d = dadosQuestSel()
@@ -934,6 +1048,7 @@ local MODOS = {
       end },
     { nome = "Level", chaves = { "AutoFarm" }, raio = 3000, pastas = soEnemies,
       preparar = function() Quest:Garantir() end,
+      aoMatar = function(alvo) Quest:Matou(alvo) end,
       filtro = function(e) return Quest.mob ~= nil and e.Name == Quest.mob end,
       fallback = function() return Quest.mob and spawnMaisProximo({ [Quest.mob] = true }) or nil end },
     { nome = "Nearest", chaves = { "AutoFarmNearest" }, filtro = qualquer, raio = 500, pastas = soEnemies },
@@ -989,11 +1104,17 @@ local function combater(modo, alvo, char, myRoot, myHum, backpack)
                 skills = true
             end
         end
-        CombatManager:Atacar(char, myHum, backpack, tooltip, alvo)
+                CombatManager:Atacar(char, myHum, backpack, tooltip, alvo)
         if skills then CombatManager:UsarHabilidades() end
         task.wait()
     end
     Cfg:Set("EmMovimento", false)
+
+    -- contabiliza a morte do alvo (usado pelo controle de missão)
+    if modo.aoMatar then
+        local ok, morto = pcall(function() return humAlvo.Health <= 0 end)
+        if ok and morto then pcall(modo.aoMatar, alvo) end
+    end
 end
 
 local function cicloCombate()
@@ -2538,6 +2659,489 @@ function F.irParaFrutaMaisProxima()
 end
 
 -- =========================================================================
+-- EVENTOS TEMPORÁRIOS (Halloween e semelhantes): motor por palavras-chave
+-- Os NOMES internos dos objetos do jogo NÃO são conhecidos: tudo aqui trabalha
+-- com palavras-chave editáveis e com um escaneador que mostra o que existe.
+-- =========================================================================
+do
+    -- Índice de objetos "interagíveis" (ProximityPrompt / ClickDetector / TouchInterest):
+    -- uma varredura inicial (só quando algum recurso do evento é usado) + eventos.
+    local indice = {}
+    local montado = false
+    local function interagivel(d)
+        return d:IsA("ProximityPrompt") or d:IsA("ClickDetector") or d.ClassName == "TouchInterest"
+    end
+    local function montarIndice()
+        if montado then return end
+        montado = true
+        ScriptJanitor:Adicionar(Workspace.DescendantAdded:Connect(function(d)
+            if interagivel(d) then indice[d] = true end
+        end))
+        ScriptJanitor:Adicionar(Workspace.DescendantRemoving:Connect(function(d)
+            if indice[d] then indice[d] = nil end
+        end))
+        for _, d in ipairs(Workspace:GetDescendants()) do
+            if interagivel(d) then indice[d] = true end
+        end
+    end
+
+    local function parteDoInteragivel(inst)
+        local pai = inst.Parent
+        if not pai then return nil end
+        if pai:IsA("BasePart") then return pai end
+        if pai:IsA("Attachment") and pai.Parent and pai.Parent:IsA("BasePart") then return pai.Parent end
+        return F.parteDe(pai)
+    end
+
+    local function temHumanoid(parte)
+        local m = parte:FindFirstAncestorOfClass("Model")
+        return m ~= nil and m:FindFirstChildOfClass("Humanoid") ~= nil
+    end
+
+    -- Nome do próprio objeto + até 3 ancestrais (+ textos do prompt) para casar com as palavras
+    local function textosDe(inst)
+        local l, n = {}, inst
+        for _ = 1, 4 do
+            if not n or n == Workspace or n == game then break end
+            table.insert(l, normKw(n.Name))
+            n = n.Parent
+        end
+        if inst:IsA("ProximityPrompt") then
+            table.insert(l, normKw(inst.ActionText))
+            table.insert(l, normKw(inst.ObjectText))
+        end
+        return l
+    end
+
+    local cacheCasa = {}
+    local function casaInter(inst, chaveKw)
+        local lista = kwDe(chaveKw)
+        local sig = table.concat(lista, ",")
+        cacheCasa[chaveKw] = cacheCasa[chaveKw] or setmetatable({}, { __mode = "k" })
+        local c = cacheCasa[chaveKw][inst]
+        if c and c.sig == sig then return c.kw or nil end
+        local kw = nil
+        for _, t in ipairs(textosDe(inst)) do
+            for _, k in ipairs(lista) do
+                if string.find(t, k, 1, true) then kw = k break end
+            end
+            if kw then break end
+        end
+        cacheCasa[chaveKw][inst] = { sig = sig, kw = kw or false }
+        return kw
+    end
+
+    -- Interagíveis cujo nome (ou de um ancestral próximo) contém alguma palavra da lista
+    local function candidatos(chaveKw, raio, centro)
+        montarIndice()
+        local root = meuRoot()
+        local ref = centro or (root and root.Position)
+        if not ref then return {} end
+        local lista = {}
+        for inst in pairs(indice) do
+            if inst.Parent and not (inst:IsA("ProximityPrompt") and not inst.Enabled) then
+                local kw = casaInter(inst, chaveKw)
+                if kw and (inst.ClassName ~= "TouchInterest" or Cfg:Get("EventoToque")) then
+                    local parte = parteDoInteragivel(inst)
+                    if parte and not temHumanoid(parte) then
+                        local d = (parte.Position - ref).Magnitude
+                        if d <= raio then
+                            table.insert(lista, { inst = inst, parte = parte, dist = d, kw = kw })
+                        end
+                    end
+                end
+            end
+        end
+        table.sort(lista, function(a, b) return a.dist < b.dist end)
+        return lista
+    end
+
+    local function interagir(c)
+        local inst, parte = c.inst, c.parte
+        if inst:IsA("ProximityPrompt") then
+            if not fireproximityprompt then return false, "fireproximityprompt indisponível neste executor" end
+            fireproximityprompt(inst)
+        elseif inst:IsA("ClickDetector") then
+            if not fireclickdetector then return false, "fireclickdetector indisponível neste executor" end
+            fireclickdetector(inst)
+        else
+            local root = meuRoot()
+            if not (firetouchinterest and root) then return false, "firetouchinterest indisponível neste executor" end
+            firetouchinterest(root, parte, 0)
+            firetouchinterest(root, parte, 1)
+        end
+        return true
+    end
+
+    local visitados = setmetatable({}, { __mode = "k" })
+    -- Vai até o interagível mais próximo ainda não visitado (dentro do raio) e interage.
+    -- Devolve o tempo de espera até a próxima volta.
+    local function ciclo(chaveKw, cooldown, ativoFn)
+        local raio = tonumber(Cfg:Get("EventoRaio")) or 1500
+        local lista = candidatos(chaveKw, raio)
+        local agora = os.clock()
+        for _, c in ipairs(lista) do
+            if not ativoFn() then return 1 end
+            local usado = visitados[c.inst]
+            if not usado or agora - usado > cooldown then
+                local chegou = MovementService:Interpola(c.parte.CFrame + Vector3.new(0, 3, 0),
+                    velCfg("VelColeta", 150), ativoFn)
+                if chegou and ativoFn() then
+                    local ok, res, motivo = pcall(interagir, c)
+                    visitados[c.inst] = os.clock()
+                    if ok and res then
+                        registrarLog("Evento", string.format("Interagiu: [%s] %s (palavra '%s')",
+                            c.inst.ClassName, c.inst:GetFullName(), c.kw))
+                    else
+                        registrarLog("Evento", "Falha ao interagir com " .. c.inst:GetFullName()
+                            .. ": " .. tostring(ok and motivo or res))
+                    end
+                else
+                    -- não chegou (ou outro movimento estava em curso): tenta de novo em ~5s
+                    visitados[c.inst] = os.clock() - cooldown + 5
+                end
+                return 0.3
+            end
+        end
+        return 1.5
+    end
+
+    loopToggle("EventoColetar", "EventoColeta", function()
+        local function ativo() return Cfg:Get("EventoColetar") and not Estado.pausa end
+        if not ativo() then return 1 end
+        return ciclo("EventoColetaveis", 20, ativo)
+    end)
+
+    loopToggle("EventoPortasOn", "EventoPortas", function()
+        local function ativo()
+            return Cfg:Get("EventoPortasOn") and not Estado.pausa
+                and (not Cfg:Get("EventoSoHarvest") or F.harvestAtiva())
+        end
+        if not ativo() then return 2 end
+        return ciclo("EventoPortas", 120, ativo)
+    end)
+
+    -- ---- Quebrar objetos (abóboras): vai até o objeto e ATACA com a arma/estilo ----
+    -- Segundo os guias, as abóboras são quebradas atacando (não por prompt/clique).
+    -- Aqui NÃO se sabe como elas são representadas no jogo: o script procura
+    -- Model/BasePart cujo nome contém as palavras, fora de Enemies/Characters e sem Humanoid.
+    local quebrar = { indice = {}, sig = nil, montando = false, ouvinte = nil, total = 0 }
+
+    local function ehExcluido(inst)
+        local e = Workspace:FindFirstChild("Enemies")
+        local c = Workspace:FindFirstChild("Characters")
+        if (e and inst:IsDescendantOf(e)) or (c and inst:IsDescendantOf(c)) then return true end
+        local m = inst:IsA("Model") and inst or inst:FindFirstAncestorOfClass("Model")
+        return m ~= nil and m:FindFirstChildOfClass("Humanoid") ~= nil
+    end
+
+    local function casaQuebrar(inst)
+        if not (inst:IsA("Model") or inst:IsA("BasePart")) then return false end
+        local inc = kwDe("EventoQuebrar")
+        if not casaKw(inst.Name, inc) then return false end
+        local exc = kwDe("EventoQuebrarExcluir")
+        if #exc > 0 and casaKw(inst.Name, exc) then return false end
+        -- peça solta dentro de um Model que já casa: só o Model conta
+        if inst:IsA("BasePart") then
+            local pai = inst.Parent
+            if pai and pai ~= Workspace and pai:IsA("Model") and casaKw(pai.Name, inc) then return false end
+        end
+        return not ehExcluido(inst)
+    end
+
+    -- Varredura completa só quando as palavras mudam (em lotes) + eventos para o que nascer depois
+    local function reindexar()
+        local sig = table.concat(kwDe("EventoQuebrar"), ",") .. "|" .. table.concat(kwDe("EventoQuebrarExcluir"), ",")
+        if quebrar.sig == sig or quebrar.montando then return end
+        quebrar.montando = true
+        quebrar.sig = sig
+        quebrar.indice = {}
+        if not quebrar.ouvinte then
+            quebrar.ouvinte = ScriptJanitor:Adicionar(Workspace.DescendantAdded:Connect(function(d)
+                if Cfg:Get("EventoQuebrarOn") and casaQuebrar(d) then quebrar.indice[d] = true end
+            end))
+        end
+        local n = 0
+        for _, d in ipairs(Workspace:GetDescendants()) do
+            n = n + 1
+            if n % 3000 == 0 then task.wait() end
+            if casaQuebrar(d) then quebrar.indice[d] = true end
+        end
+        quebrar.montando = false
+    end
+
+    local quebradosEm = setmetatable({}, { __mode = "k" })   -- cooldown por objeto
+
+    local function cicloQuebrar()
+        if Estado.pausa then return 1 end
+        reindexar()
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+        if not (root and hum and hum.Health > 0 and backpack) then return 1 end
+
+        local raio = tonumber(Cfg:Get("EventoRaio")) or 1500
+        local melhor, menor, melhorCf = nil, raio, nil
+        for inst in pairs(quebrar.indice) do
+            if not inst.Parent then
+                quebrar.indice[inst] = nil
+            else
+                local usado = quebradosEm[inst]
+                if not usado or os.clock() - usado > 0 then
+                    local cf = pivotDe(inst)
+                    if cf then
+                        local d = (cf.Position - root.Position).Magnitude
+                        if d < menor then menor, melhor, melhorCf = d, inst, cf end
+                    end
+                end
+            end
+        end
+        if not melhor then return 1.5 end
+
+        local ativo = function() return Cfg:Get("EventoQuebrarOn") and not Estado.pausa end
+        local alvoPos = melhorCf.Position
+        local caminho = melhor:GetFullName()
+        -- ponto de ataque: 4 studs ao lado do objeto (do lado em que você já está), olhando para ele
+        local horiz = Vector3.new(root.Position.X - alvoPos.X, 0, root.Position.Z - alvoPos.Z)
+        local dir = horiz.Magnitude > 0.1 and horiz.Unit or Vector3.new(0, 0, 1)
+        local ponto = alvoPos + dir * 4 + Vector3.new(0, 2, 0)
+        local olhar = Vector3.new(alvoPos.X, ponto.Y, alvoPos.Z)
+
+        local chegou = MovementService:Interpola(CFrame.lookAt(ponto, olhar), velCfg("VelColeta", 150), ativo)
+        if not (chegou and ativo()) then
+            quebradosEm[melhor] = os.clock() + 5      -- tenta de novo em ~5s
+            return 0.5
+        end
+
+        Cfg:Set("EmMovimento", true)
+        local inicio, quebrou = os.clock(), false
+        while Estado.rodando and ativo() and os.clock() - inicio < 6 do
+            if hum.Health <= 0 or not root.Parent then break end
+            if not melhor.Parent then quebrou = true break end
+            root.CFrame = CFrame.lookAt(ponto, olhar)
+            root.AssemblyLinearVelocity = Vector3.zero
+            CombatManager:Clicar(char, hum, backpack, Cfg:Get("Weapon"))
+            task.wait()
+        end
+        Cfg:Set("EmMovimento", false)
+        if not melhor.Parent then quebrou = true end
+        if quebrou then
+            quebrar.total = quebrar.total + 1
+            registrarLog("Evento", string.format("Quebrou (#%d): %s", quebrar.total, caminho))
+        else
+            -- não saiu do mapa em 6s: não insiste por 10 min (pode ser enfeite, e não alvo)
+            quebradosEm[melhor] = os.clock() + 600
+            registrarLog("Evento", "NÃO quebrou em 6s (ignorando por 10 min): " .. caminho)
+        end
+        return 0.2
+    end
+
+    loopToggle("EventoQuebrarOn", "EventoQuebrar", cicloQuebrar)
+
+    -- Aviso de início da Harvest Moon (primeiros 10 min de cada hora, relógio do servidor)
+    task.spawn(function()
+        local ativaAntes = nil
+        while Estado.rodando do
+            if Cfg:Get("EventoAvisoHarvest") then
+                local ativa = F.harvestAtiva()
+                if ativaAntes == false and ativa then
+                    F.avisar("Harvest Moon!", "Começou a Harvest Moon (primeiros 10 min da hora, UTC). Segundo os guias, é quando as portas funcionam.", 16753920)
+                end
+                ativaAntes = ativa
+            else
+                ativaAntes = nil
+            end
+            task.wait(2)
+        end
+    end)
+
+    -- Monitor de spawns: registra no F9 (e avisa, para mobs) tudo o que aparecer com nome da lista
+    local conMonitor, contLog, ultimoAviso = nil, 0, {}
+    function F.eventoMonitor(ligado)
+        if conMonitor then conMonitor:Disconnect() conMonitor = nil end
+        if not ligado then return end
+        conMonitor = Workspace.DescendantAdded:Connect(function(d)
+            if not (d:IsA("Model") or d:IsA("BasePart") or d:IsA("Tool") or d:IsA("Folder")) then return end
+            if contLog >= 300 then return end
+            local cat, kw = "mob", casaKw(d.Name, kwDe("EventoMobs"))
+            if not kw then cat, kw = "item", casaKw(d.Name, kwDe("EventoColetaveis")) end
+            if not kw then cat, kw = "porta", casaKw(d.Name, kwDe("EventoPortas")) end
+            if not kw then cat, kw = "npc", casaKw(d.Name, kwDe("EventoNpcs")) end
+            if not kw then return end
+            contLog = contLog + 1
+            registrarLog("Evento", string.format("[spawn %s] [%s] %s", cat, d.ClassName, d:GetFullName()))
+            if cat == "mob" and d:IsA("Model") and os.clock() - (ultimoAviso[d.Name] or -999) > 30 then
+                ultimoAviso[d.Name] = os.clock()
+                F.avisar("Evento: " .. d.Name .. " apareceu", "[" .. d.ClassName .. "] " .. d:GetFullName(), 15844367)
+            end
+        end)
+    end
+    ScriptJanitor:Adicionar({ Destroy = function()
+        if conMonitor then conMonitor:Disconnect() conMonitor = nil end
+    end }, "Destroy")
+
+    function F.aplicarPresetEvento(nome)
+        local p = PRESETS_EVENTO[nome]
+        if not p then return end   -- "Personalizado": mantém o que você digitou
+        Cfg:Set("EventoMobs", p.mobs)
+        Cfg:Set("EventoColetaveis", p.coletaveis)
+        Cfg:Set("EventoPortas", p.portas)
+        Cfg:Set("EventoNpcs", p.npcs)
+        Cfg:Set("EventoQuebrar", p.quebrar)
+        Cfg:Set("EventoQuebrarExcluir", p.excluir)
+    end
+
+    -- NPCs do evento (texto original digitado, para mostrar na lista)
+    function F.eventoNpcsLista()
+        local l = {}
+        for pedaco in string.gmatch(tostring(Cfg:Get("EventoNpcs") or ""), "[^,;\n]+") do
+            local t = trim(pedaco)
+            if t ~= "" then table.insert(l, t) end
+        end
+        return #l > 0 and l or { "(nenhum)" }
+    end
+
+    function F.irParaNpcEvento()
+        task.spawn(function()
+            local nome = trim(Cfg:Get("EventoNpcSel"))
+            if nome == "" or nome == "(nenhum)" then notificar("Evento", "Informe os NPCs do evento primeiro.") return end
+            pausar()
+            local ok, npc = pcall(F.localizarNpc, { nome })
+            retomar()
+            local cf = ok and npc and pivotDe(npc)
+            if cf then
+                notificar("Evento", "Indo até " .. npc.Name)
+                teleportar(cf + Vector3.new(0, 4, 0))
+            else
+                notificar("Evento", "Não achei '" .. nome .. "'. Rode o \"Escanear evento\" (resultado no F9).")
+            end
+        end)
+    end
+
+    -- Relatório completo: o que existe no jogo com os nomes das suas palavras-chave
+    -- e quais interagíveis existem perto de você. Yield (varredura em lotes).
+    function F.escanearEvento()
+        task.spawn(function()
+            local linhas = {}
+            local function out(s)
+                table.insert(linhas, s)
+                registrarLog("Evento", s)
+            end
+            out("=== Escaneamento de evento - Automata Hub v" .. VERSAO .. " ===")
+            out(string.format("Horário do servidor (UTC): %s | Harvest Moon (min 0-10): %s",
+                os.date("!%Y-%m-%d %H:%M:%S", math.floor(F.agoraUtc())), tostring(F.harvestAtiva())))
+            out("PlaceId=" .. tostring(game.PlaceId) .. " | StreamingEnabled=" .. tostring(Workspace.StreamingEnabled))
+            local root = meuRoot()
+            if root then
+                out(string.format("Sua posição: %.0f, %.0f, %.0f", root.Position.X, root.Position.Y, root.Position.Z))
+            end
+
+            local grupos = {
+                { "mobs", "EventoMobs" }, { "itens", "EventoColetaveis" },
+                { "portas", "EventoPortas" }, { "npcs", "EventoNpcs" },
+                { "quebrar", "EventoQuebrar" },
+            }
+            local achados, listas = {}, {}
+            for _, g in ipairs(grupos) do
+                achados[g[1]] = {}
+                listas[g[1]] = kwDe(g[2])
+                out(string.format("Palavras (%s): %s", g[1], #listas[g[1]] > 0 and table.concat(listas[g[1]], ", ") or "(nenhuma)"))
+            end
+
+            local contador = 0
+            for _, raiz in ipairs({ Workspace, ReplicatedStorage }) do
+                for _, d in ipairs(raiz:GetDescendants()) do
+                    contador = contador + 1
+                    if contador % 3000 == 0 then task.wait() end
+                    if d:IsA("Model") or d:IsA("BasePart") or d:IsA("Folder") or d:IsA("Tool")
+                        or d:IsA("ProximityPrompt") or d:IsA("ClickDetector") then
+                        local n = normKw(d.Name)
+                        if n ~= "" then
+                            for _, g in ipairs(grupos) do
+                                local l = achados[g[1]]
+                                if #l < 30 then
+                                    for _, k in ipairs(listas[g[1]]) do
+                                        if string.find(n, k, 1, true) then table.insert(l, { d, k }) break end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            out("Instâncias examinadas (Workspace + ReplicatedStorage): " .. contador)
+
+            for _, g in ipairs(grupos) do
+                local l = achados[g[1]]
+                if #l == 0 then
+                    out(string.format("[%s] nenhuma instância com essas palavras no nome", g[1]))
+                else
+                    out(string.format("[%s] %d resultado(s)%s", g[1], #l, #l >= 30 and " (limitado a 30)" or ""))
+                    for _, par in ipairs(l) do
+                        local d, k = par[1], par[2]
+                        local extra = {}
+                        if d:IsA("Model") and d:FindFirstChildOfClass("Humanoid") then table.insert(extra, "Humanoid") end
+                        pcall(function()
+                            if d:FindFirstChildWhichIsA("ProximityPrompt", true) then table.insert(extra, "tem ProximityPrompt") end
+                            if d:FindFirstChildWhichIsA("ClickDetector", true) then table.insert(extra, "tem ClickDetector") end
+                        end)
+                        local cf = pivotDe(d)
+                        out(string.format("   [%s] %s | '%s' | %s%s", d.ClassName, d:GetFullName(), k,
+                            cf and string.format("pos %.0f,%.0f,%.0f", cf.Position.X, cf.Position.Y, cf.Position.Z) or "sem posição",
+                            #extra > 0 and (" | " .. table.concat(extra, ", ")) or ""))
+                    end
+                end
+            end
+
+            -- o que o farm usaria agora (interagíveis que casam com as palavras)
+            for _, par in ipairs({ { "itens", "EventoColetaveis" }, { "portas", "EventoPortas" } }) do
+                local c = candidatos(par[2], 1e9)
+                out(string.format("Interagíveis que o auto-coletar usaria (%s): %d", par[1], #c))
+                for i = 1, math.min(#c, 15) do
+                    out(string.format("   %.0f studs | [%s] %s | '%s'", c[i].dist, c[i].inst.ClassName, c[i].inst:GetFullName(), c[i].kw))
+                end
+            end
+
+            -- tudo que é interagível num raio de 120 studs de você (sem filtro de palavras):
+            -- fique ao lado de uma porta / abóbora e rode o escaneamento para descobrir o nome real
+            if root then
+                montarIndice()
+                local perto = {}
+                for inst in pairs(indice) do
+                    if inst.Parent then
+                        local parte = parteDoInteragivel(inst)
+                        if parte then
+                            local d = (parte.Position - root.Position).Magnitude
+                            if d <= 120 then table.insert(perto, { inst, d }) end
+                        end
+                    end
+                end
+                table.sort(perto, function(a, b) return a[2] < b[2] end)
+                out("Interagíveis (ProximityPrompt/ClickDetector/TouchInterest) a até 120 studs de você: " .. #perto)
+                for i = 1, math.min(#perto, 40) do
+                    local inst = perto[i][1]
+                    local texto = ""
+                    if inst:IsA("ProximityPrompt") then
+                        texto = string.format(" | ActionText='%s' ObjectText='%s' Enabled=%s",
+                            inst.ActionText, inst.ObjectText, tostring(inst.Enabled))
+                    end
+                    out(string.format("   %.0f studs | [%s] %s%s", perto[i][2], inst.ClassName, inst:GetFullName(), texto))
+                end
+            end
+
+            out("=== fim do escaneamento ===")
+            local texto = table.concat(linhas, "\n")
+            local copiado, salvo = false, false
+            if setclipboard then copiado = pcall(setclipboard, texto) end
+            if writefile then salvo = pcall(writefile, "automata_diagnostico_evento.txt", texto) end
+            notificar("Escaneamento de evento", string.format("Pronto (%d linhas). Área de transferência: %s | Arquivo: %s | F9: sim.",
+                #linhas, copiado and "copiado" or "indisponível", salvo and "salvo" or "indisponível"))
+        end)
+    end
+end
+
+-- =========================================================================
 -- HELPERS DE GUI
 -- =========================================================================
 local function montarGui(gui)
@@ -3354,9 +3958,30 @@ end
 local function listaBossesSelecionados() return listaBossesDoSea(seaEfetivo()) end
 local function listaMissoesSelecionadas() return QuestDB:Lista(seaEfetivo()) end
 
+-- Fim da listagem oficial do evento Halloween 2026 na Roblox: 15/11/2026 01:00 UTC
+-- (duas fontes de guias concordam; o jogo não mostra data própria)
+local FIM_HALLOWEEN_UTC = 1794704400
+local function infoEvento()
+    local agora = F.agoraUtc()
+    local resto = FIM_HALLOWEEN_UTC - agora
+    local fim
+    if resto > 0 then
+        fim = string.format("Listagem oficial do Halloween 2026 termina em %dd %02dh %02dmin",
+            math.floor(resto / 86400), math.floor((resto % 86400) / 3600), math.floor((resto % 3600) / 60))
+    else
+        fim = "A listagem oficial do Halloween 2026 (15/11/2026 01:00 UTC) já terminou"
+    end
+    local seg = agora % 3600
+    local lua = seg < 600
+        and string.format("Harvest Moon ATIVA (mais %d min)", math.ceil((600 - seg) / 60))
+        or string.format("Próxima Harvest Moon em %d min", math.ceil((3600 - seg) / 60))
+    return fim .. "\n" .. lua .. "\nDatas e mecânicas vêm de guias de terceiros (checados em 01/11/2026); o jogo não as confirma."
+end
+
 local CONTROLES = {
     -- MAIN
     { aba = "Main", tipo = "toggle", nome = "Auto Farm Level", chave = "AutoFarm" },
+    { aba = "Main", tipo = "toggle", nome = "Travar a missão até concluir (Auto Farm Level)", chave = "QuestTravar" },
     { aba = "Main", tipo = "dropdown", nome = "Select Weapon", chave = "Weapon", opcoes = ARMAS },
     { aba = "Main", tipo = "toggle", nome = "Auto Farm Nearest", chave = "AutoFarmNearest" },
     { aba = "Main", tipo = "toggle", nome = "Fast Attack", chave = "FastAttack" },
@@ -3448,6 +4073,30 @@ local CONTROLES = {
     { aba = "ESP", tipo = "slider", nome = "Tamanho do texto", chave = "EspTamanho", min = 10, max = 24, passo = 1 },
 
     -- EVENTOS
+    { aba = "Eventos", tipo = "secao", nome = "Halloween e eventos temporários" },
+    { aba = "Eventos", tipo = "info", texto = infoEvento },
+    { aba = "Eventos", tipo = "dropdown", nome = "Preset de palavras", chave = "EventoPreset", opcoes = OPCOES_PRESET_EVENTO, aoMudar = F.aplicarPresetEvento },
+    { aba = "Eventos", tipo = "input", nome = "Mobs / bosses do evento (palavras, separe por vírgula)", chave = "EventoMobs", placeholder = "ex: werewolf, hellrider" },
+    { aba = "Eventos", tipo = "input", nome = "Itens para coletar (palavras)", chave = "EventoColetaveis", placeholder = "ex: pumpkin" },
+    { aba = "Eventos", tipo = "input", nome = "Portas / interações da Harvest Moon (palavras)", chave = "EventoPortas", placeholder = "ex: door" },
+    { aba = "Eventos", tipo = "input", nome = "NPCs do evento (palavras)", chave = "EventoNpcs", placeholder = "ex: zioles, witch" },
+    { aba = "Eventos", tipo = "toggle", nome = "Auto Farm mobs / bosses do evento", chave = "EventoFarmMobs" },
+    { aba = "Eventos", tipo = "toggle", nome = "Auto coletar itens do evento", chave = "EventoColetar" },
+    { aba = "Eventos", tipo = "toggle", nome = "Auto interagir com portas", chave = "EventoPortasOn" },
+    { aba = "Eventos", tipo = "input", nome = "Objetos para QUEBRAR atacando - abóboras (palavras)", chave = "EventoQuebrar", placeholder = "ex: pumpkin, jack o lantern" },
+    { aba = "Eventos", tipo = "input", nome = "NÃO quebrar (palavras)", chave = "EventoQuebrarExcluir", placeholder = "ex: gray, grey" },
+    { aba = "Eventos", tipo = "toggle", nome = "Auto quebrar abóboras (ataca com a arma selecionada)", chave = "EventoQuebrarOn" },
+    { aba = "Eventos", tipo = "info", texto = "Quebrar: vai até cada objeto com esse nome (Model/Peça fora de Enemies, sem Humanoid), olha para ele e ataca por até 6 s com a arma da aba Main. O F9 registra \"Quebrou\" ou \"NÃO quebrou\"; o que não quebra é ignorado por 10 min (pode ser enfeite). Os objetos de cada palavra aparecem no Escanear evento." },
+    { aba = "Eventos", tipo = "toggle", nome = "Portas só na Harvest Moon (min 0-10 de cada hora, UTC)", chave = "EventoSoHarvest" },
+    { aba = "Eventos", tipo = "toggle", nome = "Incluir itens por toque (sem prompt/clique)", chave = "EventoToque" },
+    { aba = "Eventos", tipo = "slider", nome = "Raio de busca (studs)", chave = "EventoRaio", min = 100, max = 6000, passo = 100 },
+    { aba = "Eventos", tipo = "toggle", nome = "Avisar quando a Harvest Moon começar", chave = "EventoAvisoHarvest" },
+    { aba = "Eventos", tipo = "toggle", nome = "Monitorar spawns do evento (F9 + aviso para mobs)", chave = "EventoMonitor", aoMudar = F.eventoMonitor },
+    { aba = "Eventos", tipo = "dropdown", nome = "NPC do evento", chave = "EventoNpcSel", opcoes = F.eventoNpcsLista },
+    { aba = "Eventos", tipo = "botao", nome = "Ir até o NPC do evento", acao = F.irParaNpcEvento },
+    { aba = "Eventos", tipo = "botao", nome = "Escanear evento (F9 + área de transferência)", acao = F.escanearEvento },
+    { aba = "Eventos", tipo = "info", texto = "Como usar: os nomes padrão vêm de guias e NÃO foram verificados no jogo. Fique ao lado de uma porta ou abóbora do evento e rode \"Escanear evento\": ele lista o nome real e os interagíveis a 120 studs de você. Ajuste as palavras acima. O farm de mobs só enxerga o que estiver em Workspace.Enemies. As ações de movimento são uma por vez: evite ligar o coletar e o Auto Farm ao mesmo tempo." },
+    { aba = "Eventos", tipo = "secao", nome = "Ilhas de evento, lua e baús" },
     { aba = "Eventos", tipo = "botao", nome = "Teleportar: Mirage Island", acao = function() F.irParaIlhaEvento(EVENTOS_ILHA[1]) end },
     { aba = "Eventos", tipo = "botao", nome = "Teleportar: Kitsune Island", acao = function() F.irParaIlhaEvento(EVENTOS_ILHA[2]) end },
     { aba = "Eventos", tipo = "botao", nome = "Teleportar: Prehistoric Island", acao = function() F.irParaIlhaEvento(EVENTOS_ILHA[3]) end },
@@ -4208,6 +4857,13 @@ local function construirUI()
             caixa.Text = t
             definir(c, t)
         end))
+        -- se o valor mudar por fora (ex.: preset de evento), reflete na caixa
+        registrar(function()
+            if not caixa:IsFocused() then
+                local v = tostring(Cfg:Get(c.chave) or "")
+                if caixa.Text ~= v then caixa.Text = v end
+            end
+        end)
     end
 
     local criadores = {
