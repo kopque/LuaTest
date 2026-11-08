@@ -865,19 +865,22 @@ end
 -- Gerenciador de missão. Regras:
 --  * a missão é identificada por NOME + ÍNDICE (antes só pelo nome);
 --  * com "travar" ligado, a missão atual NÃO é trocada por subir de level: só depois de concluída;
---  * "concluída" = a GUI da missão estava visível e deixou de estar; se a GUI não puder ser
---    lida, vale a contagem de mortes do alvo (>= quantidade exigida);
---  * o StartQuest só é reenviado se a missão nunca apareceu como ativa em 10 s.
+--  * "concluída" = a GUI da missão estava visível e ficou sumida por 6 s seguidos (um piscar da
+--    GUI não conta); ou, se a GUI não estiver mostrando missão ativa, a contagem de mortes do
+--    alvo chegou à quantidade exigida;
+--  * o StartQuest só é reenviado se a missão nunca apareceu como ativa em 10 s E nenhum alvo
+--    foi morto ainda, no máximo 2 vezes por missão (reenviar zera o progresso no jogo).
 local function novaGerenciadoraQuest(rotulo, escolher, travar)
     local q = { nome = nil, indice = nil, mob = nil, qtd = nil, chave = nil,
-                ultimo = 0, ultimoStart = 0, viuAtiva = false, mortes = 0 }
+                ultimo = 0, ultimoStart = 0, viuAtiva = false, mortes = 0,
+                semGui = nil, reenvios = 0 }
 
     local function chaveDe(n, i) return tostring(n) .. "#" .. tostring(i) end
 
     function q:Liberar(motivo)
         registrarLog("Quest", string.format("[%s] liberando a missão %s (%s)", rotulo, tostring(self.chave), motivo))
         self.nome, self.indice, self.mob, self.qtd, self.chave = nil, nil, nil, nil, nil
-        self.viuAtiva, self.mortes = false, 0
+        self.viuAtiva, self.mortes, self.semGui, self.reenvios = false, 0, nil, 0
     end
 
     function q:Matou(alvo)
@@ -896,13 +899,18 @@ local function novaGerenciadoraQuest(rotulo, escolher, travar)
         local abandonarAntes = false
 
         if self.chave then
-            if estado == true then self.viuAtiva = true end
+            if estado == true then
+                self.viuAtiva = true
+                self.semGui = nil
+            elseif estado == false and self.viuAtiva then
+                self.semGui = self.semGui or agora
+            end
 
             local terminou = false
-            if estado == false and self.viuAtiva then
-                terminou = true
-            elseif estado == nil and self.qtd and self.mortes >= self.qtd then
-                terminou = true
+            if self.semGui and agora - self.semGui >= 6 then
+                terminou = true   -- a GUI sumiu e ficou sumida
+            elseif estado ~= true and self.qtd and self.mortes >= self.qtd then
+                terminou = true   -- a contagem de mortes bateu e a GUI não mostra missão ativa
             end
 
             if terminou then
@@ -916,11 +924,13 @@ local function novaGerenciadoraQuest(rotulo, escolher, travar)
             end
 
             if self.chave then
-                -- continua na mesma missão; só reenvia o StartQuest se ele não "pegou"
-                if estado == false and not self.viuAtiva and agora - self.ultimoStart > 10 then
+                -- continua na mesma missão; só reenvia o StartQuest se nada indica que ela está andando
+                if estado == false and not self.viuAtiva and self.mortes == 0
+                    and self.reenvios < 2 and agora - self.ultimoStart > 10 then
                     self.ultimoStart = agora
-                    registrarLog("Quest", string.format("[%s] a missão %s não apareceu como ativa em 10s: reenviando StartQuest",
-                        rotulo, self.chave))
+                    self.reenvios = self.reenvios + 1
+                    registrarLog("Quest", string.format("[%s] a missão %s não apareceu como ativa em 10s: reenviando StartQuest (%d/2)",
+                        rotulo, self.chave, self.reenvios))
                     iniciarQuest(self.nome, self.indice, false)
                 end
                 return
@@ -932,6 +942,7 @@ local function novaGerenciadoraQuest(rotulo, escolher, travar)
         self.nome, self.indice, self.mob, self.qtd = n, i, m, qtd
         self.chave = chaveDe(n, i)
         self.viuAtiva, self.mortes, self.ultimoStart = false, 0, agora
+        self.semGui, self.reenvios = nil, 0
         registrarLog("Quest", string.format("[%s] iniciando a missão %s (alvo: %s x%s)",
             rotulo, self.chave, tostring(m), tostring(qtd or "?")))
         iniciarQuest(n, i, abandonarAntes)
@@ -1104,7 +1115,7 @@ local function combater(modo, alvo, char, myRoot, myHum, backpack)
                 skills = true
             end
         end
-                CombatManager:Atacar(char, myHum, backpack, tooltip, alvo)
+        CombatManager:Atacar(char, myHum, backpack, tooltip, alvo)
         if skills then CombatManager:UsarHabilidades() end
         task.wait()
     end
