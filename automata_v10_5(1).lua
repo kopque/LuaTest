@@ -1,11 +1,28 @@
 -- =========================================================================
---   AUTOMATA HUB v13.7 - BLOX FRUITS
+--   AUTOMATA HUB v14.0 - BLOX FRUITS
 -- =========================================================================
--- AVISO: as partes específicas do jogo (remotes, nomes de pastas, bosses,
--- ID da lua, nomes das ilhas de evento) vêm de scripts da comunidade e NÃO
--- foram testadas no jogo. Tudo roda dentro de pcall: se algo falhar, o
--- console (F9) mostra o motivo e o resto do script continua funcionando.
--- Ajuste as CONSTANTES abaixo se o jogo mudar.
+--
+-- NOVIDADES v14.0 (nada foi testado no jogo)
+--  * Velocidade do tween configurável (aba Main): Teleporte, Farm e Coleta.
+--  * Intervalo entre golpes configurável (normal e Fast Attack), em ms.
+--  * Debug Screen mostra Golpes/s ENVIADOS e Dano/s OBSERVADO no alvo, para
+--    você medir se o Fast Attack muda algo de verdade.
+--  * Botão "Diagnóstico de ataque": mostra se os remotes de ataque existem.
+--
+-- NOVIDADES v13.9 (nada foi testado no jogo)
+--  * Rejoin manual, Auto Rejoin e Server Hop falharam com o mesmo erro
+--    (Unauthorized / 773). O script não contorna isso; o que mudou é que ele
+--    para de insistir: o Server Hop desiste após 2 recusas "Unauthorized"
+--    seguidas e o Chest Hop desliga a troca automática de servidor após 2
+--    tentativas sem efeito (antes repetia para sempre a cada 15s).
+--
+-- NOVIDADES v13.8 (nada foi testado no jogo)
+--  * Toda desconexão / falha de teleporte agora é AVISADA (tela + Discord, se
+--    o webhook estiver ativo) com o código e o texto do erro. Se todos os
+--    métodos de reentrada falharem, o aviso traz o motivo de cada um.
+--  * IMPORTANTE: o Rejoin usa TeleportService iniciado pelo cliente. Quando o
+--    Roblox responde "Unauthorized" a esse tipo de teleporte, o script NÃO
+--    consegue reentrar sozinho (ver explicação na conversa).
 --
 -- NOVIDADES v13.7 (nada foi testado no jogo)
 --  * Auto Rejoin: antes reagia a QUALQUER ErrorPrompt, inclusive ao popup de
@@ -45,7 +62,7 @@
 --    resultado do Fruit Sniper + botão de teste do Webhook
 --  * Loja (estilos de luta, haki), jogador (speed, pulo infinito...), etc.
 
-local VERSAO = "13.7"
+local VERSAO = "14.0"
 
 -- =========================================================================
 -- LOG / SERVIÇOS
@@ -250,6 +267,8 @@ do
         -- Main
         AutoFarm = false, AutoFarmNearest = false, AutoBones = false, AutoRandomBone = false,
         FastAttack = false, BringMob = false, AttackDistance = 6.5, Weapon = "Melee",
+        IntervaloNormalMs = 120, IntervaloFastMs = 30,
+        VelTeleport = 250, VelFarm = 75, VelColeta = 150,
         -- Mastery
         AutoMastery = false, AutoMasteryFruit = false, MasteryWeapon = "Sword", MasteryHealth = 20,
         -- Sea / Missões
@@ -507,7 +526,10 @@ end
 
 -- Remotes de ataque do jogo (Modules.Net). Blox Fruits NÃO registra dano por
 -- clique virtual: o servidor só aceita RegisterAttack + RegisterHit.
-local AtaqueNet = { atk = nil, hit = nil, ultimo = 0 }
+local AtaqueNet = { atk = nil, hit = nil, ultimo = 0, avisou = false }
+-- golpes = vezes que o script enviou RegisterAttack+RegisterHit; dano = vida
+-- perdida pelo alvo enquanto o script o atacava (inclui dano de outras fontes)
+local Metricas = { golpes = 0, falhas = 0, dano = 0 }
 
 local function obterNetAtaque()
     if AtaqueNet.atk and AtaqueNet.atk.Parent and AtaqueNet.hit and AtaqueNet.hit.Parent then
@@ -523,7 +545,15 @@ end
 
 function CombatManager:Golpear(alvo)
     local atk, hit = obterNetAtaque()
-    if not atk or not hit then return false end
+    if not atk or not hit then
+        Metricas.falhas = Metricas.falhas + 1
+        if not AtaqueNet.avisou then
+            AtaqueNet.avisou = true
+            registrarLog("Combate", "RE/RegisterAttack / RE/RegisterHit NÃO encontrados em ReplicatedStorage.Modules.Net: o dano depende só de Tool:Activate(). Rode o Diagnóstico de ataque (aba Main).")
+            notificar("Combate", "Remotes de ataque não encontrados: o Fast Attack não tem efeito. Veja o F9.")
+        end
+        return false
+    end
     local root = meuRoot()
     local pasta = pastaEnemies()
     if not root or not pasta or not alvo then return false end
@@ -546,6 +576,7 @@ function CombatManager:Golpear(alvo)
     local parte = alvo:FindFirstChild("Head") or alvo:FindFirstChild("HumanoidRootPart")
     pcall(function() atk:FireServer(0) end)
     pcall(function() hit:FireServer(parte, lista) end)
+    Metricas.golpes = Metricas.golpes + 1
     return true
 end
 
@@ -558,7 +589,9 @@ function CombatManager:Atacar(char, hum, backpack, tooltip, alvo)
     if not (ferramenta and ferramenta.Parent == char) then return end
 
     -- limita a frequência (Fast Attack = quase todo frame)
-    local intervalo = Cfg:Get("FastAttack") and 0.03 or 0.12
+    local ms = Cfg:Get("FastAttack") and (tonumber(Cfg:Get("IntervaloFastMs")) or 30)
+        or (tonumber(Cfg:Get("IntervaloNormalMs")) or 120)
+    local intervalo = math.max(ms, 0) / 1000
     if os.clock() - AtaqueNet.ultimo < intervalo then return end
     AtaqueNet.ultimo = os.clock()
 
@@ -577,6 +610,53 @@ function CombatManager:UsarHabilidades()
             VirtualInputManager:SendKeyEvent(false, tecla, false, game)
         end)
     end
+end
+
+function F.diagnosticoCombate()
+    task.spawn(function()
+        local linhas = {}
+        local function out(t)
+            table.insert(linhas, t)
+            registrarLog("Combate", t)
+        end
+        out("=== Diagnóstico de ataque - Automata Hub v" .. VERSAO .. " ===")
+        local mods = ReplicatedStorage:FindFirstChild("Modules")
+        local net = mods and mods:FindFirstChild("Net")
+        out("ReplicatedStorage.Modules: " .. (mods and "existe" or "NÃO existe"))
+        out("ReplicatedStorage.Modules.Net: " .. (net and ("existe [" .. net.ClassName .. "]") or "NÃO existe"))
+        local atk = net and net:FindFirstChild("RE/RegisterAttack")
+        local hit = net and net:FindFirstChild("RE/RegisterHit")
+        out("RE/RegisterAttack: " .. (atk and atk.ClassName or "NÃO encontrado"))
+        out("RE/RegisterHit: " .. (hit and hit.ClassName or "NÃO encontrado"))
+        if net then
+            local nomes = {}
+            for _, c in ipairs(net:GetChildren()) do
+                local l = string.lower(c.Name)
+                if string.find(l, "regist", 1, true) or string.find(l, "attack", 1, true)
+                    or string.find(l, "hit", 1, true) or string.find(l, "damage", 1, true) then
+                    table.insert(nomes, "[" .. c.ClassName .. "] " .. c.Name)
+                end
+            end
+            table.sort(nomes)
+            out("Total de filhos de Net: " .. #net:GetChildren() .. " | com 'regist/attack/hit/damage' no nome: " .. #nomes)
+            for _, n in ipairs(nomes) do out("   " .. n) end
+        end
+        local char = LocalPlayer.Character
+        local tool = char and char:FindFirstChildOfClass("Tool")
+        out("Ferramenta equipada: " .. (tool and (tool.Name .. " | ToolTip=" .. tostring(tool.ToolTip)) or "nenhuma"))
+        out(string.format("Config: FastAttack=%s | intervalo normal=%sms | intervalo Fast=%sms | arma=%s",
+            tostring(Cfg:Get("FastAttack")), tostring(Cfg:Get("IntervaloNormalMs")),
+            tostring(Cfg:Get("IntervaloFastMs")), tostring(Cfg:Get("Weapon"))))
+        out(string.format("Desde que o script carregou: golpes enviados=%d | falhas (remotes ausentes)=%d | dano observado=%.0f",
+            Metricas.golpes, Metricas.falhas, Metricas.dano))
+        out("=== fim do diagnóstico ===")
+        local texto = table.concat(linhas, "\n")
+        local copiado, salvo = false, false
+        if setclipboard then copiado = pcall(setclipboard, texto) end
+        if writefile then salvo = pcall(writefile, "automata_diagnostico_ataque.txt", texto) end
+        notificar("Diagnóstico de ataque", string.format("Pronto. Área de transferência: %s | Arquivo: %s | F9: sim.",
+            copiado and "copiado" or "indisponível", salvo and "salvo" or "indisponível"))
+    end)
 end
 
 local simRadiusOk = false
@@ -676,10 +756,15 @@ function MovementService:Interpola(destino, velocidade, aindaAtivo)
     return root.Parent ~= nil and (root.Position - destino.Position).Magnitude <= 8
 end
 
+-- Velocidade (studs/s) lida da configuração; "padrao" vale se a chave estiver vazia
+local function velCfg(chave, padrao)
+    return math.max(10, tonumber(Cfg:Get(chave)) or padrao)
+end
+
 -- Viagem em 3 fases (BLOQUEANTE): sobe -> atravessa no alto -> desce.
 -- Devolve true se chegou ao destino.
 local function viajar(cf, velocidade)
-    local v = velocidade or 250
+    local v = velocidade or velCfg("VelTeleport", 250)
     -- espera outro movimento terminar (até 20s)
     local t0 = os.clock()
     while MovementService._ocupado and os.clock() - t0 < 20 do task.wait(0.2) end
@@ -878,12 +963,16 @@ local function combater(modo, alvo, char, myRoot, myHum, backpack)
     local dist = tonumber(Cfg:Get("AttackDistance")) or 6.5
     local destino = rootAlvo.CFrame * CFrame.new(0, dist, 0)
     if (myRoot.Position - destino.Position).Magnitude > 12 then
-        if not MovementService:Interpola(destino, 75, ativo) then return end
+        if not MovementService:Interpola(destino, velCfg("VelFarm", 75), ativo) then return end
     end
 
     Cfg:Set("EmMovimento", true)
     local inicio = os.clock()
+    local vidaAnterior = humAlvo.Health
     while Estado.rodando and ativo() and os.clock() - inicio < 5 do
+        local vidaAgora = humAlvo.Health
+        if vidaAgora < vidaAnterior then Metricas.dano = Metricas.dano + (vidaAnterior - vidaAgora) end
+        vidaAnterior = vidaAgora
         if myHum.Health <= 0 or not alvo.Parent or humAlvo.Health <= 0 or not rootAlvo.Parent or not myRoot.Parent then
             break
         end
@@ -929,7 +1018,7 @@ local function cicloCombate()
             if modo.fallback then
                 local ok, cf = pcall(modo.fallback)
                 if ok and cf then
-                    MovementService:Interpola(cf + Vector3.new(0, 20, 0), 90, function() return modoAtivo(modo) end)
+                    MovementService:Interpola(cf + Vector3.new(0, 20, 0), velCfg("VelFarm", 75) * 1.2, function() return modoAtivo(modo) end)
                     return
                 end
             end
@@ -1231,7 +1320,7 @@ loopToggle("AutoTweenFruit", "TweenFruta", function()
     if melhor then
         -- a Tool pode só mudar de pai ao ser coletada: "no mapa" = filha do Workspace
         local ativo = function() return Cfg:Get("AutoTweenFruit") and melhor.Parent == Workspace and not Estado.pausa end
-        local chegou = MovementService:Interpola(melhorParte.CFrame + Vector3.new(0, 3, 0), 150, ativo)
+        local chegou = MovementService:Interpola(melhorParte.CFrame + Vector3.new(0, 3, 0), velCfg("VelColeta", 150), ativo)
         -- só encosta se o tween realmente chegou (evita teleporte direto de longe)
         if chegou and ativo() then
             local pegou = F.pegarFruta(melhor, melhorParte)
@@ -1528,6 +1617,7 @@ function F.serverHop()
         local ok, err = pcall(function()
             local candidatos = listarServidores()
             local tentativas = 0
+            local recusados = 0
             while #candidatos > 0 and tentativas < 6 do
                 tentativas = tentativas + 1
                 local i = math.random(#candidatos)
@@ -1537,6 +1627,15 @@ function F.serverHop()
                 end)
                 if feito then return end
                 Hop.falhos[id] = true
+                if string.find(tostring(motivo), "Unauthorized", 1, true) then
+                    recusados = recusados + 1
+                    if recusados >= 2 then
+                        error("o Roblox recusou o teleporte 2x seguidas (" .. tostring(motivo)
+                            .. "); parei de tentar outros servidores", 0)
+                    end
+                else
+                    recusados = 0
+                end
                 registrarLog("ServerHop", "Falhou (" .. tostring(motivo) .. "), tentando outro servidor...")
                 task.wait(1.5)
             end
@@ -1559,15 +1658,18 @@ function F.reentrar()
             function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end,                           -- qualquer servidor
         }
         local deuCerto = false
+        local motivos = {}
         for _, fn in ipairs(estrategias) do
             local feito, motivo = teleportarComRetorno(fn)
             if feito then deuCerto = true break end
+            table.insert(motivos, tostring(motivo))
             registrarLog("Rejoin", "Falhou: " .. tostring(motivo))
             notificar("Rejoin", "Falhou (" .. tostring(motivo) .. "). Tentando outro método...")
             task.wait(3)
         end
         if not deuCerto then
-            notificar("Rejoin", "Nenhum método de reentrada funcionou. Veja o F9 para os motivos.")
+            F.avisar("Rejoin - FALHOU", "Nenhum método de reentrada funcionou: "
+                .. table.concat(motivos, " || ") .. ". Reentre manualmente.", 15158332)
         end
         Hop.ocupado = false
     end)
@@ -1946,7 +2048,7 @@ do
             achou = npc ~= nil
             if npc then
                 local cf = pivotDe(npc)
-                if cf and not viajar(cf + Vector3.new(0, 4, 0), 250) then
+                if cf and not viajar(cf + Vector3.new(0, 4, 0)) then
                     error("não consegui chegar até o NPC", 0)
                 end
             else
@@ -1955,7 +2057,7 @@ do
             task.wait(0.5)
             resultado = acao()
             task.wait(0.3)
-            if achou and Cfg:Get("VoltarDepoisCompra") then viajar(origem, 250) end
+            if achou and Cfg:Get("VoltarDepoisCompra") then viajar(origem) end
         end)
         retomar()
         if not ok then return false, tostring(err), achou end
@@ -2427,7 +2529,7 @@ function F.irParaFrutaMaisProxima()
         task.spawn(function()
             local ok, err = pcall(function()
                 -- só encosta se o tween chegou (evita teleporte direto de longe)
-                local chegou = MovementService:Interpola(melhor.CFrame + Vector3.new(0, 3, 0), 250)
+                local chegou = MovementService:Interpola(melhor.CFrame + Vector3.new(0, 3, 0), velCfg("VelTeleport", 250))
                 if chegou then F.pegarFruta(melhorFruta, melhor) end
             end)
             if not ok then registrarErro("Teleport", err) end
@@ -3066,7 +3168,7 @@ local function cicloBaus()
     for _, obj in ipairs(lista) do
         if not chestAtivo() or not Estado.rodando then break end
         if obj.Parent then
-            local chegou = MovementService:Interpola(obj.CFrame + Vector3.new(0, 3, 0), 120, chestAtivo)
+            local chegou = MovementService:Interpola(obj.CFrame + Vector3.new(0, 3, 0), velCfg("VelColeta", 150), chestAtivo)
             if chegou then visitados[obj] = os.clock() end
             task.wait(0.2)
         end
@@ -3075,11 +3177,22 @@ local function cicloBaus()
 end
 
 task.spawn(function()
+    local hopsSemEfeito = 0
     while Estado.rodando do
         if chestAtivo() then
             local ok, res = pcall(cicloBaus)
             if not ok then registrarErro("ChestHop", res)
-            elseif res == 0 and Cfg:Get("ChestHopServer") then F.serverHop() task.wait(15) end
+            elseif res == 0 and Cfg:Get("ChestHopServer") then
+                F.serverHop()
+                task.wait(30)
+                -- se o teleporte tivesse funcionado, o jogo já teria trocado de servidor
+                hopsSemEfeito = hopsSemEfeito + 1
+                if hopsSemEfeito >= 2 then
+                    hopsSemEfeito = 0
+                    Cfg:Set("ChestHopServer", false)
+                    notificar("Chest Hop", "Desliguei a troca automática de servidor: 2 tentativas seguidas sem trocar de servidor. Veja o F9.")
+                end
+            end
         end
         task.wait(1)
     end
@@ -3159,14 +3272,18 @@ task.spawn(function()
             if c.Name ~= "ErrorPrompt" then return end
             task.wait(1)   -- dá tempo para o texto e o código de erro ficarem prontos
             local valor, nomeCod = codigoDeErro()
+            local textoPrompt = textoDoPrompt(c)
             registrarLog("Rejoin", string.format("ErrorPrompt: código=%s (%s) | texto: %s",
-                tostring(valor), tostring(nomeCod), textoDoPrompt(c)))
+                tostring(valor), tostring(nomeCod), textoPrompt))
+            local eTeleporte = (valor ~= nil and valor >= 768 and valor <= 775)
+                or (os.clock() - Hop.ultimaFalha < 8)
+            -- avisa SEMPRE (tela + Discord, se o webhook estiver ativo)
+            F.avisar(eTeleporte and "Falha de teleporte" or "Desconectado do jogo",
+                string.format("Código %s (%s). %s", tostring(valor), tostring(nomeCod), textoPrompt), 15158332)
             if not Cfg:Get("AutoRejoin") then return end
 
             -- Falha de teleporte (768-775) ou teleporte recusado há poucos segundos:
             -- você continua no jogo; "reentrar" repetiria o teleporte que acabou de falhar.
-            local eTeleporte = (valor ~= nil and valor >= 768 and valor <= 775)
-                or (os.clock() - Hop.ultimaFalha < 8)
             if eTeleporte then
                 registrarLog("Rejoin", "Prompt de falha de teleporte: Auto Rejoin NÃO acionado.")
                 return
@@ -3243,6 +3360,14 @@ local CONTROLES = {
     { aba = "Main", tipo = "dropdown", nome = "Select Weapon", chave = "Weapon", opcoes = ARMAS },
     { aba = "Main", tipo = "toggle", nome = "Auto Farm Nearest", chave = "AutoFarmNearest" },
     { aba = "Main", tipo = "toggle", nome = "Fast Attack", chave = "FastAttack" },
+    { aba = "Main", tipo = "slider", nome = "Intervalo entre golpes (ms) - normal", chave = "IntervaloNormalMs", min = 0, max = 500, passo = 10 },
+    { aba = "Main", tipo = "slider", nome = "Intervalo entre golpes (ms) - Fast Attack", chave = "IntervaloFastMs", min = 0, max = 300, passo = 5 },
+    { aba = "Main", tipo = "botao", nome = "Diagnóstico de ataque (F9 + área de transferência)", acao = F.diagnosticoCombate },
+    { aba = "Main", tipo = "info", texto = "Cada golpe só pode sair uma vez por quadro do jogo, então intervalos menores que ~1 quadro (cerca de 17 ms a 60 FPS) não aceleram mais nada. Ligue o Debug Screen (aba Sistema) para ver Golpes/s enviados e Dano/s observado no alvo." },
+    { aba = "Main", tipo = "secao", nome = "Velocidade do tween (studs/s)" },
+    { aba = "Main", tipo = "slider", nome = "Teleporte / viagens", chave = "VelTeleport", min = 50, max = 1000, passo = 25 },
+    { aba = "Main", tipo = "slider", nome = "Farm (aproximar do alvo / ir ao spawn)", chave = "VelFarm", min = 30, max = 400, passo = 5 },
+    { aba = "Main", tipo = "slider", nome = "Coleta (frutas / baús)", chave = "VelColeta", min = 50, max = 600, passo = 10 },
     { aba = "Main", tipo = "slider", nome = "Attack Distance", chave = "AttackDistance", min = 3, max = 20, passo = 1 },
     { aba = "Main", tipo = "toggle", nome = "Bring Mob", chave = "BringMob" },
     { aba = "Main", tipo = "toggle", nome = "Auto Farm Bones", chave = "AutoBones" },
@@ -3416,6 +3541,7 @@ local CONTROLES = {
     { aba = "Sistema", tipo = "toggle", nome = "Debug Screen", chave = "Debug" },
     { aba = "Sistema", tipo = "toggle", nome = "Anti-AFK", chave = "AntiAFK" },
     { aba = "Sistema", tipo = "toggle", nome = "Auto Rejoin (queda de conexão)", chave = "AutoRejoin" },
+    { aba = "Sistema", tipo = "info", texto = "Server Hop, Rejoin e \"Entrar no servidor do JobId\" usam TeleportService iniciado pelo cliente. Se o jogo responder Unauthorized (erro 773), o script não consegue contornar: a falha é avisada e as tentativas automáticas param." },
     { aba = "Sistema", tipo = "botao", nome = "Server Hop", acao = F.serverHop },
     { aba = "Sistema", tipo = "botao", nome = "Reentrar no jogo (Rejoin)", acao = F.reentrar },
     { aba = "Sistema", tipo = "botao", nome = "Copiar JobId deste servidor", acao = F.copiarJobId },
@@ -3460,7 +3586,7 @@ local function criarDebugHud()
     ScriptJanitor:Adicionar(gui, "Destroy")
 
     local label = Instance.new("TextLabel")
-    label.Size = UDim2.new(0, 230, 0, 106)
+    label.Size = UDim2.new(0, 230, 0, 122)
     label.Position = UDim2.new(1, -220, 0, 10)
     label.BackgroundColor3 = Color3.fromRGB(15, 15, 22)
     label.BackgroundTransparency = 0.25
@@ -3474,6 +3600,7 @@ local function criarDebugHud()
     arredondar(label)
 
     task.spawn(function()
+        local amostras = {}   -- { tempo, golpes, dano } dos últimos ~6s
         while Estado.rodando do
             label.Visible = Cfg:Get("Debug") == true
             if label.Visible then
@@ -3482,9 +3609,17 @@ local function criarDebugHud()
                     local d = LocalPlayer.Data
                     lv, beli, frag = d.Level.Value, d.Beli.Value, d.Fragments.Value
                 end)
-                label.Text = string.format(" Sessão: %s\n Modo: %s\n Sea: %d (sel. %d)\n Level: %s\n Beli: %s | Frag: %s\n AntiAFK: Idled=%d | backup=%d",
+                local agora = os.clock()
+                table.insert(amostras, { agora, Metricas.golpes, Metricas.dano })
+                while #amostras > 1 and agora - amostras[1][1] > 6 do table.remove(amostras, 1) end
+                local primeiro, ultimo = amostras[1], amostras[#amostras]
+                local dt = ultimo[1] - primeiro[1]
+                local golpesPorSeg = dt > 0 and (ultimo[2] - primeiro[2]) / dt or 0
+                local danoPorSeg = dt > 0 and (ultimo[3] - primeiro[3]) / dt or 0
+                label.Text = string.format(" Sessão: %s\n Modo: %s\n Sea: %d (sel. %d)\n Level: %s\n Beli: %s | Frag: %s\n AntiAFK: Idled=%d | backup=%d\n Golpes/s: %.1f | Dano/s: %.0f",
                     formatarTempo(os.clock() - Estado.inicio), Estado.modo, seaAtual(), seaEfetivo(),
-                    tostring(lv), tostring(beli), tostring(frag), AntiAfk.idled, AntiAfk.backup)
+                    tostring(lv), tostring(beli), tostring(frag), AntiAfk.idled, AntiAfk.backup,
+                    golpesPorSeg, danoPorSeg)
             end
             task.wait(1)
         end
