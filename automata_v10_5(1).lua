@@ -1,6 +1,15 @@
 -- =========================================================================
---   AUTOMATA HUB v14.7 - BLOX FRUITS
+--   AUTOMATA HUB v14.8 - BLOX FRUITS
 -- =========================================================================
+-- NOVIDADES v14.8 (nada foi testado no jogo)
+--  * EXPLORADOR DO MAR (aba Sea Events): com você sentado no barco, o script o conduz para a
+--    zona de perigo 4-5 ou 6 e patrulha até aparecer Mirage / Kitsune / Prehistoric / Frozen
+--    Dimension / Leviatã. A zona é lida da interface (se achar o texto) ou da distância até
+--    as ilhas (calibrada por você com os botões "Marcar zona"). Há um diagnóstico do mar.
+--  * Novo aviso: Frozen Dimension (aba Avisos).
+--  * O barco tem prioridade sobre o combate no árbitro de movimento (Teleporte > Fruta = Barco >
+--    Combate > Coleta/Evento/Baús).
+--
 -- NOVIDADES v14.7 (correções após revisão do v14.6; nada foi testado no jogo)
 --  * Movimento: "árbitro" com prioridades (Teleporte > Fruta > Combate > Coleta/Evento/Baús).
 --    Só quem tem a vez mexe na posição; os outros param no próximo quadro.
@@ -15,7 +24,7 @@
 --  * Serviços essenciais ausentes: erro claro; TeleportService é opcional (não derruba o script).
 --  * Bring Mob: avisa uma vez se sethiddenproperty não existir no executor.
 -- =========================================================================
-local VERSAO = "14.7"
+local VERSAO = "14.8"
 
 -- =========================================================================
 -- LOG / SERVIÇOS
@@ -118,10 +127,14 @@ local CODIGOS = {
 
 -- Ilhas de evento: o script procura estas palavras no nome dos filhos de
 -- Workspace.Map e Workspace._WorldOrigin.Locations.
+-- ATENÇÃO: o explorador do mar usa os ÍNDICES desta lista (1 Mirage, 2 Kitsune, 3 Prehistoric,
+-- 4 Frozen Dimension). Novas entradas devem ir só no FIM da lista.
 local EVENTOS_ILHA = {
     { chave = "MirageNotifier", titulo = "Mirage Island", palavras = { "mirage", "mystic" } },
     { chave = "KitsuneNotifier", titulo = "Kitsune Island", palavras = { "kitsune" } },
     { chave = "PrehistoricNotifier", titulo = "Prehistoric Island", palavras = { "prehistoric" } },
+    -- nomes internos NÃO verificados: confira com o "Diagnóstico do mar"
+    { chave = "FrozenNotifier", titulo = "Frozen Dimension", palavras = { "frozen dimension", "frozendimension", "frozen_dimension" } },
 }
 -- Itens de evento que o ESP tenta achar DENTRO das ilhas de evento (melhor esforço)
 local ITENS_EVENTO = { { "gear", "Blue Gear" }, { "ember", "Azure Ember" }, { "egg", "Dragon Egg" } }
@@ -270,6 +283,9 @@ do
         BossIrSpawn = false, BossIlha = nil, EliteIrIlhas = false,
         -- Sea events
         AutoSeaEvent = false, Barco = BARCOS[1], SemNevoa = false,
+        -- Explorador do mar
+        MarExplorar = false, MarAlvo = "Kitsune Island (zona 6)", MarVel = 100, MarDistMax = 0,
+        MarIrAteIlha = true, MarUsarGui = true, MarDist4 = 0, MarDist6 = 0,
         -- Raids
         RaidSelecionada = RAIDS[1], AutoBuyChip = false, AutoStartRaid = false,
         AutoRaid = false, AutoNextIsland = false, AutoAwake = false,
@@ -292,7 +308,7 @@ do
         UsarEstiloFarm = false, EstiloFarm = nil, VendedorNotifier = true, NpcBusca = "", NpcManual = "",
         -- Avisos / Eventos
         FullMoonNotifier = true, BossNotifier = false,
-        MirageNotifier = true, KitsuneNotifier = true, PrehistoricNotifier = true,
+        MirageNotifier = true, KitsuneNotifier = true, PrehistoricNotifier = true, FrozenNotifier = true,
         ChestHop = false, ChestHopServer = false,
         -- Eventos temporários
         EventoPreset = PRESET_HALLOWEEN,
@@ -344,7 +360,7 @@ end
 -- aluguel de poucos segundos, renovado a cada quadro por quem está usando; se um módulo
 -- de prioridade MAIOR pedir, ele toma a vez e o outro para no próximo quadro.
 -- Mesma prioridade: quem chegou primeiro fica.
-local PRIO = { Teleport = 4, Fruta = 3, Combate = 2, Coleta = 1 }
+local PRIO = { Teleport = 4, Fruta = 3, Barco = 3, Combate = 2, Coleta = 1 }
 local Arbitro = { dono = nil, prio = 0, ate = 0 }
 function Arbitro:Pegar(nome, prio, aluguel)
     local agora = os.clock()
@@ -3454,6 +3470,469 @@ do
 end
 
 -- =========================================================================
+-- EXPLORADOR DO MAR: barco -> zona de perigo 4-5 / 6 -> ilhas de evento e Leviatã
+-- =========================================================================
+-- O QUE VEM DE GUIAS (e não foi confirmado no jogo):
+--  * Tudo isto só vale no Sea 3. A "zona de perigo" (1 a 6) cresce com a distância às ilhas;
+--    a zona 6 aparece como "????" na bússola.
+--  * Mirage Island: aparece em zonas 1-6 (mais chance em 4-6), dura ~15 min, exige barco.
+--  * Kitsune Island: exige barco na zona 6 na hora da lua cheia; o DONO do barco precisa
+--    estar nele; só uma por servidor.
+--  * Prehistoric Island: só na zona 6.   * Frozen Dimension: só na zona 6.
+--  * Leviatã: só aparece depois de a Frozen Dimension surgir e de falar com o Frozen Watcher
+--    (guias dizem: grupo de 5 jogadores e subornar o Spy). O script NÃO faz isso por você.
+-- O QUE O SCRIPT NÃO SABE (por isso há calibração e diagnóstico):
+--  * Como o jogo mostra a zona na interface e a distância exata de cada zona.
+--  * Se mover o barco com PivotTo é aceito pelo jogo (não testado).
+-- COMO USA: compre o barco (botão), SENTE nele, ligue "Explorar o mar". O script move o barco em
+-- linha reta (sem desviar de nada), com um pouco de zigue-zague na zona certa, e PARA ao achar.
+F.OPCOES_MAR = {
+    "Mirage Island (zona 4-5)",
+    "Kitsune Island (zona 6)",
+    "Prehistoric Island (zona 6)",
+    "Frozen Dimension / Leviathan (zona 6)",
+    "Qualquer ilha de evento (zona 6)",
+}
+
+do
+    -- lo/hi = faixa de zona desejada; eventos = índices em EVENTOS_ILHA
+    local ALVOS_MAR = {
+        [F.OPCOES_MAR[1]] = { lo = 4, hi = 5, eventos = { 1 } },
+        [F.OPCOES_MAR[2]] = { lo = 6, hi = 6, eventos = { 2 } },
+        [F.OPCOES_MAR[3]] = { lo = 6, hi = 6, eventos = { 3 } },
+        [F.OPCOES_MAR[4]] = { lo = 6, hi = 6, eventos = { 4 }, leviathan = true },
+        [F.OPCOES_MAR[5]] = { lo = 6, hi = 6, eventos = { 1, 2, 3, 4 }, leviathan = true },
+    }
+    local RAIO_CHEGADA = 300   -- ao navegar até uma ilha achada, para a esta distância (studs)
+
+    local Mar = {
+        rumo = nil, rumoAlvo = nil, proxMudanca = 0,
+        status = "parado", ultimoResultado = nil,
+        dist = nil, zona = nil, fonteZona = "-",
+        ilhas = {}, ilhasT = -999,
+        guiT = -999, guiNivel = nil, guiTexto = nil,
+        eventoT = -999, achado = nil,
+    }
+    F.Mar = Mar
+
+    -- marcadores de ilha em Locations, SEM os de ilhas de evento (senão a Mirage, ao aparecer,
+    -- viraria a "ilha mais próxima" e bagunçaria o cálculo da zona)
+    local function nomeDeEvento(nome)
+        local n = string.lower(nome)
+        for _, ev in ipairs(EVENTOS_ILHA) do
+            for _, palavra in ipairs(ev.palavras) do
+                if string.find(n, palavra, 1, true) then return true end
+            end
+        end
+        return false
+    end
+
+    local function ilhasConhecidas()
+        if os.clock() - Mar.ilhasT < 2 then return Mar.ilhas end
+        Mar.ilhasT = os.clock()
+        local l = {}
+        local locs = locations()
+        if locs then
+            for _, c in ipairs(locs:GetChildren()) do
+                if not nomeDeEvento(c.Name) then
+                    local cf = pivotDe(c)
+                    if cf then table.insert(l, { nome = c.Name, pos = cf.Position }) end
+                end
+            end
+        end
+        Mar.ilhas = l
+        return l
+    end
+
+    -- distância horizontal até a ilha mais próxima. Devolve (distância, ilha) ou nil
+    local function distIlhas(pos)
+        local melhor, menor = nil, math.huge
+        for _, i in ipairs(ilhasConhecidas()) do
+            local d = Vector3.new(pos.X - i.pos.X, 0, pos.Z - i.pos.Z).Magnitude
+            if d < menor then menor, melhor = d, i end
+        end
+        if not melhor then return nil, nil end
+        return menor, melhor
+    end
+
+    -- O barco em que você está sentado (precisa ser filho direto de Workspace.Boats)
+    function F.meuBarco()
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local assento = hum and hum.SeatPart
+        local boats = Workspace:FindFirstChild("Boats")
+        if not assento or not boats then return nil, nil end
+        local m = assento
+        while m and m.Parent ~= boats do m = m.Parent end
+        if m and m.Parent == boats then return m, assento end
+        return nil, nil
+    end
+
+    -- Leitura da zona na interface: procura um texto visível com "danger" (+ número) ou "????".
+    -- O formato real NÃO é conhecido: rode o "Diagnóstico do mar" para ver o que existe.
+    local function guiVisivel(obj)
+        local o = obj
+        while o and o ~= game do
+            if o:IsA("GuiObject") and not o.Visible then return false end
+            if o:IsA("ScreenGui") and not o.Enabled then return false end
+            o = o.Parent
+        end
+        return true
+    end
+
+    local function lerZonaGui(forcar)
+        if not forcar and os.clock() - Mar.guiT < 2 then return Mar.guiNivel, Mar.guiTexto end
+        Mar.guiT = os.clock()
+        Mar.guiNivel, Mar.guiTexto = nil, nil
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if not pg then return nil, nil end
+        for _, d in ipairs(pg:GetDescendants()) do
+            if d:IsA("TextLabel") and d.Text ~= "" then
+                local t = string.lower(d.Text)
+                local perigo = string.find(t, "danger", 1, true) ~= nil
+                local interrogacoes = string.find(t, "????", 1, true) ~= nil
+                if (perigo or interrogacoes) and guiVisivel(d) then
+                    local nivel = nil
+                    if interrogacoes then
+                        nivel = 6
+                    else
+                        nivel = tonumber(string.match(t, "danger%D*(%d+)") or string.match(t, "(%d+)"))
+                    end
+                    if nivel then
+                        Mar.guiNivel = nivel
+                        Mar.guiTexto = d:GetFullName() .. " = '" .. d.Text .. "'"
+                        return Mar.guiNivel, Mar.guiTexto
+                    end
+                end
+            end
+        end
+        return nil, nil
+    end
+    F.lerZonaGui = lerZonaGui
+
+    -- "baixo" = zona menor que a desejada | "dentro" | "alto" = maior. Ou nil + motivo.
+    local function situacao(alvo, dist)
+        local dMax = tonumber(Cfg:Get("MarDistMax")) or 0
+        if dMax > 0 and dist > dMax then
+            Mar.fonteZona = "limite de distância"
+            return "alto"
+        end
+        if Cfg:Get("MarUsarGui") ~= false then
+            local nivel, texto = lerZonaGui(false)
+            if nivel then
+                Mar.fonteZona = "interface: " .. tostring(texto)
+                Mar.zona = nivel
+                if nivel < alvo.lo then return "baixo" end
+                if nivel > alvo.hi then return "alto" end
+                return "dentro"
+            end
+        end
+        local dLo = tonumber(Cfg:Get(alvo.lo >= 6 and "MarDist6" or "MarDist4")) or 0
+        if dLo <= 0 then
+            return nil, "zona não encontrada na interface e zona " .. alvo.lo .. " não calibrada (botão \"Marcar zona\")"
+        end
+        Mar.fonteZona = "distância das ilhas (calibrada)"
+        Mar.zona = nil
+        if dist < dLo then return "baixo" end
+        if alvo.hi < 6 then
+            local d6 = tonumber(Cfg:Get("MarDist6")) or 0
+            if d6 > 0 and dist >= d6 then return "alto" end
+        end
+        return "dentro"
+    end
+
+    -- procura ilha de evento / Leviatã (no máximo 1 vez por segundo)
+    local function procurarEvento(alvo)
+        if os.clock() - Mar.eventoT < 1 then return end
+        Mar.eventoT = os.clock()
+        for _, idx in ipairs(alvo.eventos) do
+            local ev = EVENTOS_ILHA[idx]
+            local ilha = ev and F.acharIlhaEvento(ev)
+            if ilha then
+                Mar.achado = { nome = ev.titulo, obj = ilha }
+                return
+            end
+        end
+        if alvo.leviathan then
+            for _, pasta in ipairs(listaPastas(Workspace:FindFirstChild("SeaBeasts"), pastaEnemies())) do
+                for _, c in ipairs(pasta:GetChildren()) do
+                    if string.find(string.lower(c.Name), "leviathan", 1, true) then
+                        Mar.achado = { nome = "Leviathan", obj = c }
+                        return
+                    end
+                end
+            end
+        end
+    end
+
+    local function girar(v, ang)
+        local c, s = math.cos(ang), math.sin(ang)
+        return Vector3.new(v.X * c + v.Z * s, 0, -v.X * s + v.Z * c)
+    end
+
+    local function horizontal(v)
+        return Vector3.new(v.X, 0, v.Z)
+    end
+
+    -- move o barco um passo na direção Mar.rumo (sem mexer na altura) e gira a proa aos poucos
+    local function mover(barco, assento, dt, vel)
+        local pivo = barco:GetPivot()
+        local fw = horizontal(assento.CFrame.LookVector)
+        if fw.Magnitude < 0.01 then fw = Mar.rumo end
+        fw = fw.Unit
+        local delta = math.atan2(fw.Z * Mar.rumo.X - fw.X * Mar.rumo.Z, fw:Dot(Mar.rumo))
+        local maxRot = math.rad(35) * dt
+        delta = math.clamp(delta, -maxRot, maxRot)
+        local novaPos = pivo.Position + Mar.rumo * (vel * dt)
+        local rot = pivo - pivo.Position
+        barco:PivotTo(CFrame.new(novaPos) * CFrame.Angles(0, delta, 0) * rot)
+        pcall(function() assento.AssemblyLinearVelocity = Vector3.zero end)
+    end
+
+    local function finalizar(texto)
+        Mar.ultimoResultado = texto
+        Cfg:Set("MarExplorar", false)
+        Arbitro:Soltar("Barco")
+        F.avisar("Explorador do mar", texto, 5763719)
+        if F.refrescarUI then pcall(F.refrescarUI) end
+    end
+
+    local function passo(dt)
+        local alvo = ALVOS_MAR[Cfg:Get("MarAlvo")] or ALVOS_MAR[F.OPCOES_MAR[2]]
+        local barco, assento = F.meuBarco()
+        if not barco then
+            Mar.status = "sente-se em um barco (ele precisa estar em Workspace.Boats)"
+            Mar.rumo = nil
+            Arbitro:Soltar("Barco")
+            return
+        end
+        if not Arbitro:Pegar("Barco", PRIO.Barco, 2) then
+            Mar.status = "aguardando a vez (teleporte ou coleta de fruta em andamento)"
+            return
+        end
+
+        local pos = barco:GetPivot().Position
+        local dist, ilhaProx = distIlhas(pos)
+        Mar.dist = dist
+        if not dist then
+            Mar.status = "sem marcadores de ilhas em Workspace._WorldOrigin.Locations (você está no Sea 3?)"
+            return
+        end
+
+        if not Mar.rumo then
+            local fw0 = horizontal(assento.CFrame.LookVector)
+            Mar.rumo = fw0.Magnitude > 0.01 and fw0.Unit or Vector3.new(0, 0, -1)
+            Mar.rumoAlvo = Mar.rumo
+        end
+        local vel = tonumber(Cfg:Get("MarVel")) or 100
+
+        -- 1) achou uma ilha de evento / Leviatã?
+        procurarEvento(alvo)
+        if Mar.achado then
+            local obj = Mar.achado.obj
+            local cf = obj and obj.Parent and pivotDe(obj)
+            if not cf then
+                Mar.achado = nil          -- sumiu (ou ainda não carregou)
+            else
+                if not Cfg:Get("MarIrAteIlha") then
+                    finalizar(Mar.achado.nome .. " apareceu! O barco parou.")
+                    return
+                end
+                local v = horizontal(cf.Position - pos)
+                if v.Magnitude <= RAIO_CHEGADA then
+                    finalizar(Mar.achado.nome .. " está a " .. math.floor(v.Magnitude) .. " studs. O barco parou.")
+                    return
+                end
+                Mar.rumoAlvo = v.Unit
+                Mar.status = "indo até " .. Mar.achado.nome .. " (" .. math.floor(v.Magnitude) .. " studs)"
+                local nv = Mar.rumo + (Mar.rumoAlvo - Mar.rumo) * math.min(1, dt * 1.5)
+                Mar.rumo = nv.Magnitude > 0.05 and nv.Unit or Mar.rumoAlvo
+                mover(barco, assento, dt, vel)
+                return
+            end
+        end
+
+        -- 2) ainda na busca: em que zona estou em relação à desejada?
+        local sit, motivo = situacao(alvo, dist)
+        if not sit then
+            Mar.status = "parado: " .. tostring(motivo)
+            return
+        end
+        local fora = horizontal(pos - ilhaProx.pos)
+        fora = fora.Magnitude > 1 and fora.Unit or Mar.rumo
+        local agora = os.clock()
+        if sit == "baixo" then
+            Mar.rumoAlvo = fora
+            Mar.status = "indo para a zona " .. alvo.lo .. " (afastando-se das ilhas)"
+        elseif sit == "alto" then
+            Mar.rumoAlvo = -fora
+            Mar.status = "zona alta demais: voltando em direção às ilhas"
+        else
+            Mar.status = "patrulhando a zona " .. alvo.lo .. (alvo.hi ~= alvo.lo and ("-" .. alvo.hi) or "")
+            if agora >= Mar.proxMudanca then
+                Mar.rumoAlvo = girar(Mar.rumo, math.rad(math.random(-70, 70)))
+                Mar.proxMudanca = agora + math.random(12, 25)
+            end
+        end
+        local nv = Mar.rumo + (Mar.rumoAlvo - Mar.rumo) * math.min(1, dt * 1.5)
+        Mar.rumo = nv.Magnitude > 0.05 and nv.Unit or Mar.rumoAlvo
+        mover(barco, assento, dt, vel)
+    end
+
+    task.spawn(function()
+        while Estado.rodando do
+            local dt = RunService.Heartbeat:Wait()
+            if Cfg:Get("MarExplorar") and not Estado.pausa then
+                local ok, err = pcall(passo, dt)
+                if not ok then registrarErro("Mar", err) end
+            else
+                if Mar.status ~= "parado" then Mar.status = "parado" end
+                Mar.rumo, Mar.rumoAlvo, Mar.achado = nil, nil, nil
+                Arbitro:Soltar("Barco")
+            end
+        end
+    end)
+
+    -- Guarda a distância ATUAL até a ilha mais próxima como o começo da zona 4 ou da zona 6.
+    -- Use quando você mesmo estiver na zona (veja na interface do jogo / bússola).
+    function F.marcarZona(n)
+        local barco = F.meuBarco()
+        local root = meuRoot()
+        local pos = barco and barco:GetPivot().Position or (root and root.Position)
+        if not pos then notificar("Mar", "Sem personagem.") return end
+        Mar.ilhasT = -999
+        local d, ilha = distIlhas(pos)
+        if not d then notificar("Mar", "Sem marcadores de ilhas em Workspace._WorldOrigin.Locations.") return end
+        Cfg:Set(n >= 6 and "MarDist6" or "MarDist4", math.floor(d))
+        registrarLog("Mar", string.format("Zona %d marcada: %d studs da ilha mais próxima (%s)", n, math.floor(d), ilha.nome))
+        notificar("Mar", string.format("Zona %d marcada: %d studs da ilha mais próxima (%s).", n, math.floor(d), ilha.nome))
+        if F.refrescarUI then pcall(F.refrescarUI) end
+    end
+
+    function F.textoMar()
+        local l = {}
+        table.insert(l, "Estado: " .. tostring(Mar.status))
+        if Mar.ultimoResultado then table.insert(l, "Último resultado: " .. Mar.ultimoResultado) end
+        local barco = F.meuBarco()
+        table.insert(l, "Barco: " .. (barco and barco.Name or "você não está sentado em um barco"))
+        local nivel, texto = lerZonaGui(false)
+        table.insert(l, "Zona lida na interface: " .. (nivel and (tostring(nivel) .. "  [" .. tostring(texto) .. "]")
+            or "não encontrada (rode o Diagnóstico do mar)"))
+        local root = meuRoot()
+        local pos = barco and barco:GetPivot().Position or (root and root.Position)
+        local d, ilha = nil, nil
+        if pos then d, ilha = distIlhas(pos) end
+        table.insert(l, "Distância até a ilha mais próxima: " .. (d and (string.format("%.0f", d) .. " studs (" .. ilha.nome .. ")") or "?"))
+        local d4, d6 = tonumber(Cfg:Get("MarDist4")) or 0, tonumber(Cfg:Get("MarDist6")) or 0
+        table.insert(l, string.format("Calibração: zona 4 = %s | zona 6 = %s",
+            d4 > 0 and (tostring(d4) .. " studs") or "não marcada", d6 > 0 and (tostring(d6) .. " studs") or "não marcada"))
+        return table.concat(l, "\n")
+    end
+
+    function F.diagnosticoMar()
+        task.spawn(function()
+            local linhas = {}
+            local function out(s)
+                table.insert(linhas, s)
+                registrarLog("Mar", s)
+            end
+            out("=== Diagnóstico do mar - Automata Hub v" .. VERSAO .. " ===")
+            out(string.format("PlaceId=%s | seaAtual()=%d | StreamingEnabled=%s",
+                tostring(game.PlaceId), seaAtual(), tostring(Workspace.StreamingEnabled)))
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            local assento = hum and hum.SeatPart
+            out("Sentado em: " .. (assento and assento:GetFullName() .. " [" .. assento.ClassName .. "]" or "nada"))
+            local barco = F.meuBarco()
+            out("Barco reconhecido (filho direto de Workspace.Boats): " .. (barco and barco:GetFullName() or "nenhum"))
+            local boats = Workspace:FindFirstChild("Boats")
+            if boats then
+                local nomes = {}
+                for _, b in ipairs(boats:GetChildren()) do table.insert(nomes, b.Name) end
+                out("Workspace.Boats: " .. #nomes .. " itens" .. (#nomes > 0 and (" -> " .. table.concat(nomes, ", ")) or ""))
+            else
+                out("Workspace.Boats: NÃO existe")
+            end
+
+            -- textos visíveis na interface que parecem ser a zona de perigo
+            local pg = LocalPlayer:FindFirstChild("PlayerGui")
+            local achados = 0
+            if pg then
+                for _, d in ipairs(pg:GetDescendants()) do
+                    if d:IsA("TextLabel") and d.Text ~= "" then
+                        local t = string.lower(d.Text)
+                        if string.find(t, "danger", 1, true) or string.find(t, "????", 1, true)
+                            or string.find(t, "sea level", 1, true) or string.find(t, "zone", 1, true) then
+                            achados = achados + 1
+                            if achados <= 30 then
+                                out(string.format("   texto de interface [%s] visível=%s: '%s'",
+                                    d:GetFullName(), tostring(guiVisivel(d)), d.Text))
+                            end
+                        end
+                    end
+                end
+            end
+            out("Textos de interface com 'danger' / '????' / 'sea level' / 'zone': " .. achados)
+            local nivel, texto = lerZonaGui(true)
+            out("Zona que o script leu: " .. (nivel and (tostring(nivel) .. " [" .. tostring(texto) .. "]") or "nenhuma"))
+
+            -- ilhas e distâncias
+            local root = meuRoot()
+            local pos = barco and barco:GetPivot().Position or (root and root.Position)
+            Mar.ilhasT = -999
+            local ilhas = ilhasConhecidas()
+            out("Marcadores de ilha considerados (sem ilhas de evento): " .. #ilhas)
+            if pos then
+                local lista = {}
+                for _, i in ipairs(ilhas) do
+                    table.insert(lista, { i.nome, Vector3.new(pos.X - i.pos.X, 0, pos.Z - i.pos.Z).Magnitude })
+                end
+                table.sort(lista, function(a, b) return a[2] < b[2] end)
+                for i = 1, math.min(#lista, 8) do
+                    out(string.format("   %.0f studs: %s", lista[i][2], lista[i][1]))
+                end
+            end
+            out(string.format("Calibração: MarDist4=%s | MarDist6=%s | MarDistMax=%s | MarUsarGui=%s",
+                tostring(Cfg:Get("MarDist4")), tostring(Cfg:Get("MarDist6")), tostring(Cfg:Get("MarDistMax")),
+                tostring(Cfg:Get("MarUsarGui"))))
+
+            -- ilhas de evento / Leviatã já presentes?
+            for _, ev in ipairs(EVENTOS_ILHA) do
+                local ilha = F.acharIlhaEvento(ev)
+                out(string.format("%s: %s", ev.titulo, ilha and ("PRESENTE -> " .. ilha:GetFullName()) or "não encontrada"))
+            end
+            for _, pasta in ipairs(listaPastas(Workspace:FindFirstChild("SeaBeasts"), pastaEnemies())) do
+                for _, c in ipairs(pasta:GetChildren()) do
+                    if string.find(string.lower(c.Name), "leviathan", 1, true) then
+                        out("Leviathan PRESENTE -> " .. c:GetFullName())
+                    end
+                end
+            end
+
+            out("Procurando 'frozen' e 'leviathan' pelo nome em Workspace e ReplicatedStorage...")
+            local ok, resultado = pcall(F.buscarPorNome, { "frozen", "leviathan" }, 10)
+            if ok and type(resultado) == "table" then
+                for _, termo in ipairs({ "frozen", "leviathan" }) do
+                    local l = resultado[termo] or {}
+                    out(string.format("termo '%s': %d resultado(s)", termo, #l))
+                    for _, d in ipairs(l) do out("   [" .. d.ClassName .. "] " .. d:GetFullName()) end
+                end
+            else
+                out("ERRO na busca por nome: " .. tostring(resultado))
+            end
+            out("=== fim do diagnóstico ===")
+
+            local texto = table.concat(linhas, "\n")
+            local copiado, salvo = false, false
+            if setclipboard then copiado = pcall(setclipboard, texto) end
+            if writefile then salvo = pcall(writefile, "automata_diagnostico_mar.txt", texto) end
+            notificar("Diagnóstico do mar", string.format("Pronto (%d linhas). Área de transferência: %s | Arquivo: %s | F9: sim.",
+                #linhas, copiado and "copiado" or "indisponível", salvo and "salvo" or "indisponível"))
+        end)
+    end
+end
+
+-- =========================================================================
 -- HELPERS DE GUI
 -- =========================================================================
 local function montarGui(gui)
@@ -3921,7 +4400,7 @@ do
 end
 
 -- =========================================================================
--- AVISOS: LUA CHEIA E ILHAS DE EVENTO (Mirage / Kitsune / Pré-Histórica)
+-- AVISOS: LUA CHEIA E ILHAS DE EVENTO (Mirage / Kitsune / Pré-Histórica / Frozen Dimension)
 -- =========================================================================
 function F.mostrarIdLua()
     local sky = Lighting:FindFirstChildOfClass("Sky")
@@ -4281,6 +4760,7 @@ end }, "Destroy")
 -- tipos: secao | info | toggle | slider | dropdown | botao | input
 -- =========================================================================
 local atualizarVisuais = function() end   -- substituída quando a UI é montada
+F.refrescarUI = function() atualizarVisuais() end
 
 local function aoMudarSea()
     local sea = seaEfetivo()
@@ -4533,6 +5013,18 @@ local CONTROLES = {
     { aba = "Sea Events", tipo = "toggle", nome = "ESP de Barcos", chave = "EspBarco" },
     { aba = "Sea Events", tipo = "toggle", nome = "Remover Névoa (Zona 6)", chave = "SemNevoa", aoMudar = aplicarSemNevoa },
     { aba = "Sea Events", tipo = "toggle", nome = "Andar na Água", chave = "WalkWater" },
+    { aba = "Sea Events", tipo = "secao", nome = "Explorar o mar (achar ilhas de evento)" },
+    { aba = "Sea Events", tipo = "info", texto = F.textoMar },
+    { aba = "Sea Events", tipo = "dropdown", nome = "O que procurar", chave = "MarAlvo", opcoes = F.OPCOES_MAR },
+    { aba = "Sea Events", tipo = "slider", nome = "Velocidade do barco (studs/s)", chave = "MarVel", min = 30, max = 400, passo = 10 },
+    { aba = "Sea Events", tipo = "slider", nome = "Distância máxima das ilhas (0 = sem limite)", chave = "MarDistMax", min = 0, max = 30000, passo = 500 },
+    { aba = "Sea Events", tipo = "toggle", nome = "Ao achar, navegar até lá e parar", chave = "MarIrAteIlha" },
+    { aba = "Sea Events", tipo = "toggle", nome = "Ler a zona de perigo da interface do jogo", chave = "MarUsarGui" },
+    { aba = "Sea Events", tipo = "botao", nome = "Marcar a distância atual das ilhas como ZONA 4", acao = function() F.marcarZona(4) end },
+    { aba = "Sea Events", tipo = "botao", nome = "Marcar a distância atual das ilhas como ZONA 6", acao = function() F.marcarZona(6) end },
+    { aba = "Sea Events", tipo = "botao", nome = "Diagnóstico do mar (F9 + área de transferência)", acao = F.diagnosticoMar },
+    { aba = "Sea Events", tipo = "toggle", nome = "EXPLORAR O MAR (sente-se no barco antes)", chave = "MarExplorar" },
+    { aba = "Sea Events", tipo = "info", texto = "Como usar: 1) compre o barco acima e SENTE nele (o script não senta por você); 2) escolha o que procurar; 3) ligue \"Explorar o mar\". O script conduz o barco para fora das ilhas até a zona desejada e patrulha com zigue-zague até aparecer a ilha, então navega até ela e para. A zona vem do texto da interface (se achar) ou da distância até as ilhas: se não achar, vá UMA vez manualmente até a zona 6 (????) e aperte \"Marcar zona 6\" (idem zona 4 para a Mirage). Segundo guias: só no Sea 3; Mirage em zonas 1-6 (mais chance em 4-6, dura ~15 min); Kitsune na zona 6 com lua cheia e o dono do barco dentro dele; Prehistoric e Frozen Dimension na zona 6. O Leviatã só aparece depois da Frozen Dimension, falando com o Frozen Watcher (grupo de 5 e suborno do Spy): isso o script NÃO faz. O barco anda em linha reta sem desviar de nada e sem atacar monstros (o Auto Attack Sea Events fica parado enquanto ele navega). Mover o barco por script NÃO foi testado: use o Diagnóstico do mar se algo falhar." },
 
     -- RAIDS
     { aba = "Raids", tipo = "dropdown", nome = "Select Raid", chave = "RaidSelecionada", opcoes = RAIDS },
@@ -4559,7 +5051,7 @@ local CONTROLES = {
     -- ESP
     { aba = "ESP", tipo = "toggle", nome = "ESP Frutas", chave = "FruitESP" },
     { aba = "ESP", tipo = "toggle", nome = "ESP Ilhas", chave = "EspIlha" },
-    { aba = "ESP", tipo = "toggle", nome = "ESP Eventos (Mirage/Kitsune/Pré-História)", chave = "EspEvento" },
+    { aba = "ESP", tipo = "toggle", nome = "ESP Eventos (Mirage/Kitsune/Pré-História/Frozen)", chave = "EspEvento" },
     { aba = "ESP", tipo = "toggle", nome = "ESP Players", chave = "EspPlayer" },
     { aba = "ESP", tipo = "toggle", nome = "ESP Bosses (do sea selecionado)", chave = "EspBoss" },
     { aba = "ESP", tipo = "toggle", nome = "ESP Baús", chave = "EspBau" },
@@ -4595,7 +5087,7 @@ local CONTROLES = {
     { aba = "Eventos", tipo = "dropdown", nome = "NPC do evento", chave = "EventoNpcSel", opcoes = F.eventoNpcsLista },
     { aba = "Eventos", tipo = "botao", nome = "Ir até o NPC do evento", acao = F.irParaNpcEvento },
     { aba = "Eventos", tipo = "botao", nome = "Escanear evento (F9 + área de transferência)", acao = F.escanearEvento },
-    { aba = "Eventos", tipo = "info", texto = "Como usar: os nomes padrão vêm de guias e NÃO foram verificados no jogo. Fique ao lado de uma porta ou abóbora do evento e rode \"Escanear evento\": ele lista o nome real e os interagíveis a 120 studs de você. Ajuste as palavras acima. O farm de mobs só enxerga o que estiver em Workspace.Enemies. Só um módulo mexe na posição por vez (Teleporte > Fruta > Combate > Coleta/Evento/Baús): se o Auto Farm estiver ocupado, a coleta espera." },
+    { aba = "Eventos", tipo = "info", texto = "Como usar: os nomes padrão vêm de guias e NÃO foram verificados no jogo. Fique ao lado de uma porta ou abóbora do evento e rode \"Escanear evento\": ele lista o nome real e os interagíveis a 120 studs de você. Ajuste as palavras acima. O farm de mobs só enxerga o que estiver em Workspace.Enemies. Só um módulo mexe na posição por vez (Teleporte > Fruta/Barco > Combate > Coleta/Evento/Baús): se o Auto Farm estiver ocupado, a coleta espera." },
     { aba = "Eventos", tipo = "secao", nome = "Ilhas de evento, lua e baús" },
     { aba = "Eventos", tipo = "botao", nome = "Teleportar: Mirage Island", acao = function() F.irParaIlhaEvento(EVENTOS_ILHA[1]) end },
     { aba = "Eventos", tipo = "botao", nome = "Teleportar: Kitsune Island", acao = function() F.irParaIlhaEvento(EVENTOS_ILHA[2]) end },
@@ -4604,7 +5096,7 @@ local CONTROLES = {
     { aba = "Eventos", tipo = "botao", nome = "Mostrar ID da lua atual", acao = F.mostrarIdLua },
     { aba = "Eventos", tipo = "toggle", nome = "Chest Hop (Coletar Baús)", chave = "ChestHop" },
     { aba = "Eventos", tipo = "toggle", nome = "Chest Hop: trocar de servidor ao acabar", chave = "ChestHopServer" },
-    { aba = "Eventos", tipo = "info", texto = "Os avisos de Mirage, Kitsune, Pré-História, Lua Cheia, Boss e Fruta ficam na aba Avisos." },
+    { aba = "Eventos", tipo = "info", texto = "Os avisos de Mirage, Kitsune, Pré-História, Frozen Dimension, Lua Cheia, Boss e Fruta ficam na aba Avisos." },
 
     -- AVISOS
     { aba = "Avisos", tipo = "secao", nome = "Discord Webhook" },
@@ -4615,6 +5107,7 @@ local CONTROLES = {
     { aba = "Avisos", tipo = "toggle", nome = "Mirage Island", chave = "MirageNotifier" },
     { aba = "Avisos", tipo = "toggle", nome = "Kitsune Island", chave = "KitsuneNotifier" },
     { aba = "Avisos", tipo = "toggle", nome = "Prehistoric Island", chave = "PrehistoricNotifier" },
+    { aba = "Avisos", tipo = "toggle", nome = "Frozen Dimension", chave = "FrozenNotifier" },
     { aba = "Avisos", tipo = "toggle", nome = "Lua Cheia", chave = "FullMoonNotifier" },
     { aba = "Avisos", tipo = "toggle", nome = "Fruta spawnou no mapa", chave = "FruitNotifier" },
     { aba = "Avisos", tipo = "toggle", nome = "Boss spawnou", chave = "BossNotifier" },
