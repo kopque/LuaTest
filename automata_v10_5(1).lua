@@ -143,9 +143,14 @@ local RARIDADES = {
 -- =========================================================================
 -- HELPERS DE NOME / SEA
 -- =========================================================================
+-- Normaliza nomes de boss: minúsculas, sem "The " no início, sem etiquetas entre
+-- [colchetes] ou (parênteses) e sem espaços/símbolos ("Don Swan" == "DonSwan").
 local function norm(n)
     n = string.lower(tostring(n or ""))
-    n = string.gsub(n, "^the ", "")
+    n = string.gsub(n, "%b[]", "")
+    n = string.gsub(n, "%b()", "")
+    n = string.gsub(n, "^%s*the%s+", "")
+    n = string.gsub(n, "[^%w]", "")
     return n
 end
 
@@ -418,6 +423,25 @@ end
 
 local function listaBossesDoSea(sea)
     return LISTA_BOSSES_SEA[sea] or LISTA_BOSSES_SEA[1]
+end
+
+-- Com "Auto (sea atual)" aceita qualquer boss conhecido (um servidor só tem os
+-- bosses do próprio sea, então não depende da detecção do sea estar certa).
+-- Com "Sea 1/2/3" escolhido manualmente, usa só a lista daquele sea.
+local function seaEmAuto()
+    local sel = Cfg:Get("SeaSelecionado")
+    return not (type(sel) == "string" and string.match(sel, "^Sea %d$") ~= nil)
+end
+
+local function ehBoss(nome)
+    local k = norm(nome)
+    if k == "" then return false end
+    if seaEmAuto() then return ALL_BOSS_SET[k] == true end
+    return (BOSS_SET[seaEfetivo()] or {})[k] == true
+end
+
+local function ehBossOuElite(nome)
+    return ehBoss(nome) or ELITE_SET[norm(nome)] == true
 end
 
 -- ---- Banco de missões (ReplicatedStorage.Quests) ------------------------
@@ -1033,7 +1057,7 @@ end
 
 local MODOS = {
     { nome = "Boss (todos do sea)", chaves = { "AutoBossesAll" }, raio = 5000, pastas = soEnemies,
-      filtro = function(e) return (BOSS_SET[seaEfetivo()] or {})[norm(e.Name)] == true end },
+      filtro = function(e) return ehBoss(e.Name) end },
     { nome = "Boss (selecionado)", chaves = { "AutoBossSel" }, raio = 5000, pastas = soEnemies,
       filtro = function(e) return norm(e.Name) == norm(Cfg:Get("BossSelecionado")) end },
     { nome = "Elite", chaves = { "AutoElite" }, raio = 5000, pastas = soEnemies,
@@ -1588,10 +1612,8 @@ do
     loopToggle("BossNotifier", "BossNotifier", function()
         local pasta = pastaEnemies()
         if not pasta then return 5 end
-        local conjunto = BOSS_SET[seaEfetivo()] or {}
         for _, e in ipairs(pasta:GetChildren()) do
-            local k = norm(e.Name)
-            if (conjunto[k] or ELITE_SET[k]) and not vistos[e] then
+            if ehBossOuElite(e.Name) and not vistos[e] then
                 local h = e:FindFirstChildOfClass("Humanoid")
                 if h and h.Health > 0 then
                     vistos[e] = true
@@ -3452,10 +3474,8 @@ do
         { chave = "EspBoss", coletar = function(emitir)
             local pasta2 = pastaEnemies()
             if not pasta2 then return end
-            local conjunto = BOSS_SET[seaEfetivo()] or {}
             for _, e in ipairs(pasta2:GetChildren()) do
-                local k = norm(e.Name)
-                if conjunto[k] or ELITE_SET[k] then
+                if ehBossOuElite(e.Name) then
                     local r = e:FindFirstChild("HumanoidRootPart")
                     local h = e:FindFirstChildOfClass("Humanoid")
                     if r and h and h.Health > 0 then
@@ -3956,10 +3976,8 @@ local function infoBosses()
     local vivos = {}
     local pasta = pastaEnemies()
     if pasta then
-        local conjunto = BOSS_SET[sea] or {}
         for _, e in ipairs(pasta:GetChildren()) do
-            local k = norm(e.Name)
-            if conjunto[k] or ELITE_SET[k] then table.insert(vivos, e.Name) end
+            if ehBossOuElite(e.Name) then table.insert(vivos, e.Name) end
         end
     end
     return string.format("Bosses do Sea %d: %d na lista.\nSpawnados agora: %s",
@@ -3967,6 +3985,73 @@ local function infoBosses()
 end
 
 local function listaBossesSelecionados() return listaBossesDoSea(seaEfetivo()) end
+
+-- Diagnóstico de bosses: mostra o que existe em Workspace.Enemies e se o script reconhece
+function F.diagnosticoBosses()
+    task.spawn(function()
+        local linhas = {}
+        local function out(t)
+            table.insert(linhas, t)
+            registrarLog("Bosses", t)
+        end
+        out("=== Diagnóstico de bosses - Automata Hub v" .. VERSAO .. " ===")
+        out(string.format("PlaceId=%s | seaAtual()=%d | SeaSelecionado=%s | seaEfetivo()=%d | modo Auto=%s",
+            tostring(game.PlaceId), seaAtual(), tostring(Cfg:Get("SeaSelecionado")), seaEfetivo(), tostring(seaEmAuto())))
+        out("StreamingEnabled=" .. tostring(Workspace.StreamingEnabled))
+        local locs = locations()
+        out("Workspace._WorldOrigin.Locations: " .. (locs and (tostring(#locs:GetChildren()) .. " itens") or "NÃO existe"))
+        out("Boss escolhido no dropdown: " .. tostring(Cfg:Get("BossSelecionado")))
+        out(string.format("Toggles: AutoBossesAll=%s | AutoBossSel=%s | AutoElite=%s | BossNotifier=%s | EspBoss=%s",
+            tostring(Cfg:Get("AutoBossesAll")), tostring(Cfg:Get("AutoBossSel")), tostring(Cfg:Get("AutoElite")),
+            tostring(Cfg:Get("BossNotifier")), tostring(Cfg:Get("EspBoss"))))
+
+        local pasta = pastaEnemies()
+        if not pasta then
+            out("Workspace.Enemies: NÃO existe (todas as funções de boss dependem desta pasta)")
+        else
+            local filhos = pasta:GetChildren()
+            out("Workspace.Enemies: " .. #filhos .. " itens")
+            local contagem, nomes = {}, {}
+            for _, e in ipairs(filhos) do
+                if not contagem[e.Name] then
+                    contagem[e.Name] = 0
+                    table.insert(nomes, e.Name)
+                end
+                contagem[e.Name] = contagem[e.Name] + 1
+            end
+            table.sort(nomes)
+            local reconhecidos = 0
+            for _, n in ipairs(nomes) do
+                local marca = ehBossOuElite(n) and "[RECONHECIDO COMO BOSS] " or ""
+                if marca ~= "" then reconhecidos = reconhecidos + 1 end
+                out(string.format("   %s%s x%d", marca, n, contagem[n]))
+            end
+            out("Nomes distintos reconhecidos como boss/elite pelo script: " .. reconhecidos)
+        end
+
+        -- bosses das listas (todos os seas) que existem agora em Enemies
+        local presentes = {}
+        if pasta then
+            for sea, lista in pairs(BOSSES_POR_SEA) do
+                for _, nome in ipairs(lista) do
+                    if pasta:FindFirstChild(nome) or pasta:FindFirstChild("The " .. nome) then
+                        table.insert(presentes, string.format("%s (lista do Sea %d)", nome, sea))
+                    end
+                end
+            end
+        end
+        table.sort(presentes)
+        out("Bosses das listas encontrados em Enemies pelo nome exato: " .. (#presentes > 0 and table.concat(presentes, ", ") or "nenhum"))
+        out("=== fim do diagnóstico ===")
+
+        local texto = table.concat(linhas, "\n")
+        local copiado, salvo = false, false
+        if setclipboard then copiado = pcall(setclipboard, texto) end
+        if writefile then salvo = pcall(writefile, "automata_diagnostico_bosses.txt", texto) end
+        notificar("Diagnóstico de bosses", string.format("Pronto. Área de transferência: %s | Arquivo: %s | F9: sim.",
+            copiado and "copiado" or "indisponível", salvo and "salvo" or "indisponível"))
+    end)
+end
 local function listaMissoesSelecionadas() return QuestDB:Lista(seaEfetivo()) end
 
 -- Fim da listagem oficial do evento Halloween 2026 na Roblox: 15/11/2026 01:00 UTC
@@ -4035,6 +4120,7 @@ local CONTROLES = {
     { aba = "Bosses", tipo = "toggle", nome = "Auto Elite Hunter (Sea 3)", chave = "AutoElite" },
     { aba = "Bosses", tipo = "toggle", nome = "Avisar quando um boss spawnar", chave = "BossNotifier" },
     { aba = "Bosses", tipo = "toggle", nome = "ESP de Bosses", chave = "EspBoss" },
+    { aba = "Bosses", tipo = "botao", nome = "Diagnóstico de bosses (F9 + área de transferência)", acao = F.diagnosticoBosses },
 
     -- SEA EVENTS
     { aba = "Sea Events", tipo = "dropdown", nome = "Select Boat", chave = "Barco", opcoes = BARCOS },
