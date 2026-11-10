@@ -1,7 +1,7 @@
 -- =========================================================================
---   AUTOMATA HUB v14.3 - BLOX FRUITS
+--   AUTOMATA HUB v14.5 - BLOX FRUITS
 -- =========================================================================
-local VERSAO = "14.3"
+local VERSAO = "14.5"
 
 -- =========================================================================
 -- LOG / SERVIÇOS
@@ -238,6 +238,7 @@ do
         QuestTravar = true,
         -- Bosses
         AutoBossesAll = false, AutoBossSel = false, BossSelecionado = nil, AutoElite = false,
+        BossIrSpawn = false, BossIlha = nil,
         -- Sea events
         AutoSeaEvent = false, Barco = BARCOS[1], SemNevoa = false,
         -- Raids
@@ -411,7 +412,8 @@ local function seaAtual()
             if locs:FindFirstChild(nome) then seaCache = sea return sea end
         end
     end
-    seaCache = 1
+    -- Nenhuma ilha do Sea 2/3 achada: assume Sea 1, mas SEM guardar em cache
+    -- (as ilhas podem ainda não ter carregado; antes isso travava no sea errado).
     return 1
 end
 
@@ -1055,11 +1057,74 @@ local function proximaIlhaRaid()
     return nil
 end
 
+-- ---- Ir até o spawn do boss quando ele não está carregado no mapa ------------
+-- Só usa o que existe de verdade no jogo: spawns de Workspace._WorldOrigin.EnemySpawns
+-- cujo nome bate com o do boss e/ou a ilha que VOCÊ escolheu na aba Bosses.
+-- Visita cada spawn por ~8 s e só volta a ele depois de ~90 s (para rodar entre vários).
+local spawnVisitas = setmetatable({}, { __mode = "k" })
+local function spawnDeBoss(casar)
+    local spawns, root = spawnsPasta(), meuRoot()
+    if not spawns or not root then return nil end
+    local agora = os.clock()
+    local melhor, menor = nil, math.huge
+    for _, sp in ipairs(spawns:GetChildren()) do
+        if casar(norm(sp.Name)) then
+            local cf = pivotDe(sp)
+            if cf then
+                local v = spawnVisitas[sp]
+                local d = (cf.Position - root.Position).Magnitude
+                local pular = false
+                if v and v.fim and agora - v.fim < 90 then
+                    pular = true
+                elseif d < 60 then
+                    if not v then v = { chegada = agora } spawnVisitas[sp] = v end
+                    if agora - v.chegada >= 8 then
+                        v.fim = agora
+                        pular = true
+                    end
+                end
+                if not pular and d < menor then menor, melhor = d, cf end
+            end
+        end
+    end
+    return melhor
+end
+
+local function ilhaDeApoioBoss()
+    local locs, nome = locations(), Cfg:Get("BossIlha")
+    local ilha = locs and nome and locs:FindFirstChild(nome)
+    local cf = pivotDe(ilha)
+    if not cf then return nil end
+    return F.pontoSeguroAcima(cf.Position, false) or cf
+end
+
+local function fallbackBossTodos()
+    if not Cfg:Get("BossIrSpawn") then return nil end
+    local cf = spawnDeBoss(function(n)
+        if seaEmAuto() then return ALL_BOSS_SET[n] == true end
+        return (BOSS_SET[seaEfetivo()] or {})[n] == true
+    end)
+    return cf or ilhaDeApoioBoss()
+end
+
+local function fallbackBossSel()
+    if not Cfg:Get("BossIrSpawn") then return nil end
+    local alvo = norm(Cfg:Get("BossSelecionado"))
+    if alvo ~= "" then
+        local cf = spawnDeBoss(function(n) return n == alvo end)
+        if not cf then cf = spawnDeBoss(function(n) return string.find(n, alvo, 1, true) ~= nil end) end
+        if cf then return cf end
+    end
+    return ilhaDeApoioBoss()
+end
+
 local MODOS = {
     { nome = "Boss (todos do sea)", chaves = { "AutoBossesAll" }, raio = 5000, pastas = soEnemies,
-      filtro = function(e) return ehBoss(e.Name) end },
+      filtro = function(e) return ehBoss(e.Name) end,
+      fallback = fallbackBossTodos },
     { nome = "Boss (selecionado)", chaves = { "AutoBossSel" }, raio = 5000, pastas = soEnemies,
-      filtro = function(e) return norm(e.Name) == norm(Cfg:Get("BossSelecionado")) end },
+      filtro = function(e) return norm(e.Name) == norm(Cfg:Get("BossSelecionado")) end,
+      fallback = fallbackBossSel },
     { nome = "Elite", chaves = { "AutoElite" }, raio = 5000, pastas = soEnemies,
       filtro = function(e) return ELITE_SET[norm(e.Name)] == true end },
     { nome = "Evento (mobs)", chaves = { "EventoFarmMobs" }, raio = 5000, pastas = soEnemies,
@@ -4042,6 +4107,55 @@ function F.diagnosticoBosses()
         end
         table.sort(presentes)
         out("Bosses das listas encontrados em Enemies pelo nome exato: " .. (#presentes > 0 and table.concat(presentes, ", ") or "nenhum"))
+
+        -- onde existem modelos com Humanoid e nome de boss (Workspace e ReplicatedStorage)
+        local spawnsDir = spawnsPasta()
+        if not spawnsDir then
+            out("Workspace._WorldOrigin.EnemySpawns: NÃO existe")
+        else
+            local filhosS = spawnsDir:GetChildren()
+            out("Workspace._WorldOrigin.EnemySpawns: " .. #filhosS .. " itens")
+            local casados, distintos, vistosS = {}, {}, {}
+            for _, sp in ipairs(filhosS) do
+                local n = norm(sp.Name)
+                if (ALL_BOSS_SET[n] or ELITE_SET[n]) and not vistosS["b" .. sp.Name] then
+                    vistosS["b" .. sp.Name] = true
+                    table.insert(casados, sp.Name)
+                end
+                if not vistosS[sp.Name] and #distintos < 40 then
+                    vistosS[sp.Name] = true
+                    table.insert(distintos, sp.Name)
+                end
+            end
+            table.sort(casados)
+            out("Spawns com nome exato de boss/elite: " .. (#casados > 0 and table.concat(casados, ", ") or "nenhum"))
+            out("Primeiros nomes distintos em EnemySpawns (até 40): " .. table.concat(distintos, ", "))
+        end
+
+        out("Procurando modelos com Humanoid e nome de boss em Workspace e ReplicatedStorage (pode levar alguns segundos)...")
+        local okBusca, errBusca = pcall(function()
+            local achados, contador = {}, 0
+            for _, raiz in ipairs({ Workspace, ReplicatedStorage }) do
+                for _, d in ipairs(raiz:GetDescendants()) do
+                    contador = contador + 1
+                    if contador % 3000 == 0 then task.wait() end
+                    if #achados < 60 and d:IsA("Model") then
+                        local k = norm(d.Name)
+                        if (ALL_BOSS_SET[k] or ELITE_SET[k]) and d:FindFirstChildOfClass("Humanoid") then
+                            table.insert(achados, d:GetFullName())
+                        end
+                    end
+                end
+            end
+            out("Instâncias examinadas: " .. contador)
+            if #achados == 0 then
+                out("Nenhum modelo com Humanoid e nome de boss/elite foi encontrado agora")
+            else
+                out("Modelos com Humanoid e nome de boss/elite: " .. #achados .. (#achados >= 60 and " (limitado a 60)" or ""))
+                for _, caminho in ipairs(achados) do out("   " .. caminho) end
+            end
+        end)
+        if not okBusca then out("ERRO na busca por modelos de boss: " .. tostring(errBusca)) end
         out("=== fim do diagnóstico ===")
 
         local texto = table.concat(linhas, "\n")
@@ -4053,6 +4167,31 @@ function F.diagnosticoBosses()
     end)
 end
 local function listaMissoesSelecionadas() return QuestDB:Lista(seaEfetivo()) end
+
+-- Corrige seleções que ficaram de outro sea (ex.: escolhidas no carregamento, antes
+-- de o sea ser detectado). Sem isso, "Auto Farm Selected Boss" ficava procurando um
+-- boss que não existe no sea atual.
+local function listaContem(lista, v)
+    for _, x in ipairs(lista) do
+        if x == v then return true end
+    end
+    return false
+end
+task.spawn(function()
+    while Estado.rodando do
+        pcall(function()
+            local bosses = listaBossesSelecionados()
+            if not listaContem(bosses, Cfg:Get("BossSelecionado")) then
+                Cfg:Set("BossSelecionado", bosses[1])
+            end
+            local missoes = listaMissoesSelecionadas()
+            if not listaContem(missoes, Cfg:Get("QuestSelecionada")) then
+                Cfg:Set("QuestSelecionada", missoes[1])
+            end
+        end)
+        task.wait(3)
+    end
+end)
 
 -- Fim da listagem oficial do evento Halloween 2026 na Roblox: 15/11/2026 01:00 UTC
 -- (duas fontes de guias concordam; o jogo não mostra data própria)
@@ -4121,6 +4260,9 @@ local CONTROLES = {
     { aba = "Bosses", tipo = "toggle", nome = "Avisar quando um boss spawnar", chave = "BossNotifier" },
     { aba = "Bosses", tipo = "toggle", nome = "ESP de Bosses", chave = "EspBoss" },
     { aba = "Bosses", tipo = "botao", nome = "Diagnóstico de bosses (F9 + área de transferência)", acao = F.diagnosticoBosses },
+    { aba = "Bosses", tipo = "toggle", nome = "Ir ao spawn do boss quando ele não estiver no mapa", chave = "BossIrSpawn" },
+    { aba = "Bosses", tipo = "dropdown", nome = "Ilha de apoio (se o spawn não for achado)", chave = "BossIlha", opcoes = F.listarIlhas },
+    { aba = "Bosses", tipo = "info", texto = "Vale para \"Auto Farm All Bosses\" e \"Auto Farm Selected Boss\". O script procura em EnemySpawns um spawn com o nome do boss; se não houver, vai até a ilha de apoio que você escolheu e espera lá. Esses nomes NÃO foram verificados no jogo: rode o Diagnóstico de bosses para ver o que existe em EnemySpawns." },
 
     -- SEA EVENTS
     { aba = "Sea Events", tipo = "dropdown", nome = "Select Boat", chave = "Barco", opcoes = BARCOS },
