@@ -1,7 +1,7 @@
 -- =========================================================================
---   AUTOMATA HUB v14.5 - BLOX FRUITS
+--   AUTOMATA HUB v14.6 - BLOX FRUITS
 -- =========================================================================
-local VERSAO = "14.5"
+local VERSAO = "14.6"
 
 -- =========================================================================
 -- LOG / SERVIÇOS
@@ -238,7 +238,7 @@ do
         QuestTravar = true,
         -- Bosses
         AutoBossesAll = false, AutoBossSel = false, BossSelecionado = nil, AutoElite = false,
-        BossIrSpawn = false, BossIlha = nil,
+        BossIrSpawn = false, BossIlha = nil, EliteIrIlhas = false,
         -- Sea events
         AutoSeaEvent = false, Barco = BARCOS[1], SemNevoa = false,
         -- Raids
@@ -1072,9 +1072,13 @@ local function spawnDeBoss(casar)
             local cf = pivotDe(sp)
             if cf then
                 local v = spawnVisitas[sp]
+                if v and v.fim and agora - v.fim >= 90 then
+                    spawnVisitas[sp] = nil   -- descanso acabou: pode visitar de novo
+                    v = nil
+                end
                 local d = (cf.Position - root.Position).Magnitude
                 local pular = false
-                if v and v.fim and agora - v.fim < 90 then
+                if v and v.fim then
                     pular = true
                 elseif d < 60 then
                     if not v then v = { chegada = agora } spawnVisitas[sp] = v end
@@ -1118,6 +1122,48 @@ local function fallbackBossSel()
     return ilhaDeApoioBoss()
 end
 
+-- Elite Pirates (Diablo, Deandre, Urban): segundo guias, só existem no Sea 3, nascem um de
+-- cada vez, ~10 min após o anterior morrer, em pontos espalhados por 4 ilhas.
+-- Sem nada na pasta Enemies, o script tenta (1) spawns de EnemySpawns com o nome de um
+-- Elite e (2) visitar o marcador de cada uma dessas ilhas, ~12 s por ilha. O marcador é um
+-- ponto só: os spawns ficam espalhados, então isto é uma ajuda, não uma garantia.
+local ILHAS_ELITE = { "Port Town", "Hydra Island", "Great Tree", "Floating Turtle" }
+local ilhaEliteVisitas = {}
+local function fallbackElite()
+    if not Cfg:Get("EliteIrIlhas") then return nil end
+    local cfSpawn = spawnDeBoss(function(n) return ELITE_SET[n] == true end)
+    if cfSpawn then return cfSpawn end
+
+    local locs, root = locations(), meuRoot()
+    if not locs or not root then return nil end
+    local agora = os.clock()
+    local melhor, menor = nil, math.huge
+    for _, nome in ipairs(ILHAS_ELITE) do
+        local pcf = pivotDe(locs:FindFirstChild(nome))
+        if pcf then
+            local v = ilhaEliteVisitas[nome]
+            if v and v.fim and agora - v.fim >= 60 then
+                ilhaEliteVisitas[nome] = nil
+                v = nil
+            end
+            local d = (pcf.Position - root.Position).Magnitude
+            local pular = false
+            if v and v.fim then
+                pular = true
+            elseif d < 250 then
+                if not v then v = { chegada = agora } ilhaEliteVisitas[nome] = v end
+                if agora - v.chegada >= 12 then
+                    v.fim = agora
+                    pular = true
+                end
+            end
+            if not pular and d < menor then menor, melhor = d, pcf end
+        end
+    end
+    if melhor then return F.pontoSeguroAcima(melhor.Position, false) or melhor end
+    return nil
+end
+
 local MODOS = {
     { nome = "Boss (todos do sea)", chaves = { "AutoBossesAll" }, raio = 5000, pastas = soEnemies,
       filtro = function(e) return ehBoss(e.Name) end,
@@ -1126,7 +1172,8 @@ local MODOS = {
       filtro = function(e) return norm(e.Name) == norm(Cfg:Get("BossSelecionado")) end,
       fallback = fallbackBossSel },
     { nome = "Elite", chaves = { "AutoElite" }, raio = 5000, pastas = soEnemies,
-      filtro = function(e) return ELITE_SET[norm(e.Name)] == true end },
+      filtro = function(e) return ELITE_SET[norm(e.Name)] == true end,
+      fallback = fallbackElite },
     { nome = "Evento (mobs)", chaves = { "EventoFarmMobs" }, raio = 5000, pastas = soEnemies,
       filtro = function(e) return casaKw(e.Name, kwDe("EventoMobs")) ~= nil end },
     { nome = "Sea Event", chaves = { "AutoSeaEvent" }, raio = 5000,
@@ -4257,6 +4304,8 @@ local CONTROLES = {
     { aba = "Bosses", tipo = "dropdown", nome = "Select Boss", chave = "BossSelecionado", opcoes = listaBossesSelecionados },
     { aba = "Bosses", tipo = "toggle", nome = "Auto Farm Selected Boss", chave = "AutoBossSel" },
     { aba = "Bosses", tipo = "toggle", nome = "Auto Elite Hunter (Sea 3)", chave = "AutoElite" },
+    { aba = "Bosses", tipo = "toggle", nome = "Elite: ir às ilhas onde eles nascem quando não houver nenhum no mapa", chave = "EliteIrIlhas" },
+    { aba = "Bosses", tipo = "info", texto = "Elite Pirates (Diablo, Deandre, Urban): segundo guias, só no Sea 3, um por vez, ~10 min após o anterior morrer, em Port Town, Hydra Island, Great Tree e Floating Turtle. O Auto Elite Hunter só envia o pedido de missão ao jogo (resposta no F9); o script NÃO vai até o NPC Elite Hunter (Castle on the Sea). A opção acima visita o marcador de cada ilha por ~12 s; os pontos de spawn ficam espalhados pela ilha." },
     { aba = "Bosses", tipo = "toggle", nome = "Avisar quando um boss spawnar", chave = "BossNotifier" },
     { aba = "Bosses", tipo = "toggle", nome = "ESP de Bosses", chave = "EspBoss" },
     { aba = "Bosses", tipo = "botao", nome = "Diagnóstico de bosses (F9 + área de transferência)", acao = F.diagnosticoBosses },
